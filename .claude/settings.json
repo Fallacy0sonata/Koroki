@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(conda create -n mfa -c conda-forge montreal-forced-aligner -y 2>&1)",
+      "PowerShell(Tail -20)",
+      "PowerShell(conda create -n mfa -c conda-forge montreal-forced-aligner -y)",
+      "PowerShell(conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main)",
+      "PowerShell(conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r)",
+      "PowerShell(conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/msys2)",
+      "PowerShell(conda run -n mfa mfa model download acoustic english_mfa)",
+      "PowerShell(conda run -n mfa mfa model download dictionary english_mfa)",
+      "PowerShell(conda run -n mfa mfa model download acoustic japanese_mfa)",
+      "PowerShell(conda run -n mfa mfa model download dictionary japanese_mfa)",
+      "Bash(git clone *)",
+      "PowerShell(conda run -n mfa mfa model list acoustic)",
+      "PowerShell(conda run -n mfa mfa model list dictionary)",
+      "PowerShell(conda run -n mfa mfa align \"C:\\\\Users\\\\Shinn\\\\Desktop\\\\Koroki\\\\data\\\\mfa_input\\\\japanese\" japanese_mfa japanese_mfa \"C:\\\\Users\\\\Shinn\\\\Desktop\\\\Koroki\\\\data\\\\mfa_textgrids\\\\japanese\" --clean 2>&1)",
+      "Bash(python3 -c ' *)",
+      "Read(//tmp/**)",
+      "PowerShell(.venv_diffsinger\\\\Scripts\\\\python.exe -c \"import torch; import librosa; print\\(f'torch {torch.__version__} | cuda {torch.cuda.is_available\\(\\)} | librosa {librosa.__version__}'\\)\")",
+      "PowerShell($python = \\(Resolve-Path \".venv_diffsinger\\\\Scripts\\\\python.exe\"\\).Path; Push-Location experiments\\\\diffsinger\\\\DiffSinger; & $python scripts\\\\binarize.py --config configs\\\\koroki_ja.yaml 2>&1; Pop-Location)"
+    ]
+  }
+}

@@ -1,0 +1,78 @@
+# JPop / Anime song list for DiffSinger training data collection
+# One song name per line. Lines starting with # are ignored.
+# Target: ~300-400 clips from ~30-35 songs (~10-15 clips per song).
+# Add or remove songs freely. More songs = more diverse training data.
+
+# YOASOBI — clean female+male vocals, high quality studio recordings
+YOASOBI アイドル
+YOASOBI 夜に駆ける
+YOASOBI 群青
+YOASOBI ハルカ
+YOASOBI もし僕が願えたなら
+YOASOBI ラブレター
+YOASOBI たぶん
+YOASOBI ハッピーエンド
+YOASOBI セブンティーン
+
+# Ado — powerful female vocal, wide dynamic range
+Ado うっせぇわ
+Ado 踊
+Ado 新時代
+Ado 向日葵
+Ado 私は最強
+
+# Kenshi Yonezu — clear diction, great for alignment
+Kenshi Yonezu Lemon
+Kenshi Yonezu Pale Blue
+Kenshi Yonezu 感電
+Kenshi Yonezu 打上花火
+
+# Official HIGE DANdism — melodic jpop, clear lyrics
+Official HIGE DANdism Pretender
+Official HIGE DANdism I LOVE...
+Official HIGE DANdism Subtitle
+
+# King Gnu — varied dynamics, good for model diversity
+King Gnu 白日
+King Gnu 三文小説
+King Gnu 一途
+
+# Yorushika — indie jpop, gentle vocals similar to Koroki style
+Yorushika だから僕は音楽を辞めた
+Yorushika 花に亡霊
+Yorushika エルマ
+Yorushika ヒッチコック
+
+# Eve — anime OP/ED style, upbeat jpop
+Eve 廻廻奇譚
+Eve 蒼のワルツ
+Eve くだらないや
+
+# LiSA — anime song specialist, powerful female vocal
+LiSA 紅蓮華
+LiSA 炎
+
+# Aimer — breathy female vocal, good for soft sections
+Aimer 残響散歌
+Aimer 花の唄
+Aimer ref:rain
+
+# fhána — typical anime OP style, clear female vocal
+fhána 青空のラプソディ
+fhána 虹を編めたら
+
+# Myth & Roid — anime OP/ED, dramatic style
+Myth & Roid L.L.L.
+Myth & Roid Paradisus-Paradoxum
+
+# ZAQ — anime song specialist
+ZAQ Sparkling Daydream
+ZAQ This game
+
+# Fujii Kaze — soulful jpop, very clean recordings
+Fujii Kaze 死ぬのがいいわ
+Fujii Kaze きらり
+
+# Reol — jpop/electro, expressive female vocal
+Reol 第六感
+Reol ギミアブレスタッナウ

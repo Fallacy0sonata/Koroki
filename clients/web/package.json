@@ -1,0 +1,9 @@
+{
+  "name": "koroki-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Koroki web client prototype",
+  "scripts": {
+    "start": "echo Open http://127.0.0.1:9882 in your browser while Orchestrator is running."
+  }
+}

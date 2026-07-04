@@ -1,0 +1,17 @@
+{
+  "name": "koroki-minecraft-bot",
+  "version": "1.0.0",
+  "description": "Koroki Minecraft player client. Joins a server as a real player, uses Koroki's brain for decisions and narration.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.0.0",
+    "minecraft-data": "^3.109.1",
+    "mineflayer": "^4.37.0",
+    "mineflayer-pathfinder": "^2.4.5"
+  }
+}

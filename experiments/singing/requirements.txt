@@ -1,0 +1,9 @@
+rvc-python
+demucs
+yt-dlp
+soundfile
+numpy
+fastapi
+uvicorn[standard]
+pydantic>=2.0
+pyyaml

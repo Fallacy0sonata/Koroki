@@ -1,0 +1,63 @@
+{
+  "id": "bedroom",
+  "design": [1216, 832],
+  "skyTint": "0x93a7c9",
+  "layers": [
+    { "id": "sky", "src": "/assets/world/bedroom_scene/sky.png", "z": 0, "pos": [608, 416],
+      "scale": 1.18, "par": 2.6,
+      "motions": [ { "type": "swayX", "amp": 10, "period": 240 } ] },
+    { "id": "cloud_d", "src": "/assets/world/bedroom_scene/cloud_d.png", "z": 0.2, "pos": [880, 120],
+      "scale": 0.9, "par": 2.4,
+      "motions": [ { "type": "swayX", "amp": 34, "period": 170 }, { "type": "swayY", "amp": 3, "period": 47 } ] },
+    { "id": "wisp_b", "src": "/assets/world/bedroom_scene/wisp_b.png", "z": 0.2, "pos": [660, 90],
+      "scale": 1.0, "par": 2.4,
+      "motions": [ { "type": "swayX", "amp": 48, "period": 130 } ] },
+    { "id": "wisp_a", "src": "/assets/world/bedroom_scene/wisp_a.png", "z": 0.3, "pos": [300, 240],
+      "scale": 0.9, "par": 2.2,
+      "motions": [ { "type": "swayX", "amp": 40, "period": 110 }, { "type": "swayY", "amp": 4, "period": 39 } ] },
+    { "id": "cloud_a", "src": "/assets/world/bedroom_scene/cloud_a.png", "z": 0.3, "pos": [130, 300],
+      "scale": 0.75, "par": 2.2,
+      "motions": [ { "type": "swayX", "amp": 26, "period": 200 } ] },
+    { "id": "cloud_c", "src": "/assets/world/bedroom_scene/cloud_c.png", "z": 0.35, "pos": [1080, 260],
+      "scale": 0.8, "par": 2.1,
+      "motions": [ { "type": "swayX", "amp": 22, "period": 150 }, { "type": "swayY", "amp": 3, "period": 61 } ] },
+    { "id": "cloud_b", "src": "/assets/world/bedroom_scene/cloud_b.png", "z": 0.4, "pos": [760, 190],
+      "scale": 0.7, "par": 2.0,
+      "motions": [ { "type": "swayX", "amp": 30, "period": 180 } ] },
+
+    { "id": "shell", "src": "/assets/world/bedroom_scene/shell.png", "z": 1, "pos": [608, 416],
+      "scale": 1.0, "par": 0 },
+
+    { "id": "rug", "src": "/assets/flux_style_farm/furniture/cut/rug.png", "z": 2.1,
+      "pos": [980, 760], "scale": 0.5, "par": 0.3 },
+    { "id": "potted_plant", "src": "/assets/flux_style_farm/furniture/cut/potted_plant.png", "z": 2.2,
+      "pos": [612, 736], "scale": 0.2, "par": 0.3, "anchorY": 1.0,
+      "motions": [ { "type": "tremble", "amp": 0.35, "period": 4.2 } ] },
+    { "id": "small_plant", "src": "/assets/flux_style_farm/furniture/cut/small_plant.png", "z": 2.2,
+      "pos": [204, 460], "scale": 0.15, "par": 0.3, "anchorY": 1.0,
+      "motions": [ { "type": "tremble", "amp": 0.4, "period": 3.6 } ] },
+
+    { "id": "bed_front", "src": "/assets/world/bedroom_scene/bed_front.png", "z": 3.5,
+      "pos": [608, 416], "scale": 1.0, "par": 0 },
+
+    { "id": "glow_nightstand", "glow": true, "z": 2.8, "pos": [92, 540], "scale": 1.5,
+      "tint": "0xffb45e", "alpha": 0.34, "par": 0.2,
+      "motions": [ { "type": "pulse", "amp": 0.08, "period": 6.2 } ] },
+    { "id": "glow_sill", "glow": true, "z": 2.8, "pos": [508, 470], "scale": 1.1,
+      "tint": "0xffa94f", "alpha": 0.3, "par": 0.2,
+      "motions": [ { "type": "pulse", "amp": 0.07, "period": 5.1 } ] }
+  ],
+  "cityLights": {
+    "parent": "sky",
+    "dots": [
+      [300, 300], [312, 344], [286, 400], [430, 392], [482, 468], [520, 500],
+      [648, 478], [700, 522], [878, 468], [930, 432], [1002, 498], [1052, 478],
+      [1122, 520], [200, 478], [756, 556], [840, 540]
+    ]
+  },
+  "spots": [
+    { "name": "bed", "pos": [440, 640], "h": 300, "pose": "sit", "z": 3 },
+    { "name": "window", "pos": [1010, 800], "h": 430, "pose": "stand", "z": 4 },
+    { "name": "center", "pos": [700, 812], "h": 450, "pose": "stand", "z": 4 }
+  ]
+}

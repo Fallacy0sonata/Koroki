@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web-preview",
+      "runtimeExecutable": "C:\\Users\\Shinn\\Desktop\\Koroki\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["C:\\Users\\Shinn\\AppData\\Local\\Temp\\claude\\C--Users-Shinn-Desktop-Koroki\\a3f40ec0-389f-4f05-832f-0483d1a967f0\\scratchpad\\preview_server.py"],
+      "port": 8899
+    }
+  ]
+}

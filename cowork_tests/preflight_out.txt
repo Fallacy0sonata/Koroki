@@ -1,0 +1,42 @@
+=== ComfyUI kill ===
+=== VRAM ===
+memory.used [MiB]
+1611 MiB
+=== doctor ===
+
+== Virtual environments (expect exactly 4) ==
+  [ OK ] .venv_diffsinger -> Python 3.11.9
+  [ OK ] .venv_singing -> Python 3.11.9
+  [ OK ] .venv -> Python 3.12.10
+  [ OK ] .venv_indextts -> Python 3.11.9
+
+== CUDA (main stack .venv) ==
+  [ OK ] torch CUDA available (True 12.8)
+
+== Model files (production path) ==
+  [ OK ] RVC Korokiv5 weights
+  [ OK ] LoRA koroki_4b
+  [ OK ] NSF-HiFiGAN vocoder
+  [ OK ] DiffSinger v12 @40000
+  [ OK ] IndexTTS gpt.pth
+  [ OK ] RVC Korokiv5 index
+  [ OK ] phoneme dict 63
+  [ OK ] DiffSinger base 160k
+
+== Config & secrets ==
+  [ OK ] config/settings.yaml
+  [ OK ] .env has DISCORD_TOKEN
+  [ OK ] .env has OWNER_DISCORD_ID
+  [ OK ] .env has INTERNAL_API_KEY
+  [ OK ] .env has HF_TOKEN
+
+== Disk space ==
+  [ OK ] C: 57.5 GB free
+
+== Service ports (free = not yet started; listening = service up) ==
+  [ -- ] 9000 (IndexTTS) — free
+  [ -- ] 9882 (Orchestrator) — free
+  [ -- ] 9881 (Brain) — free
+
+All checks passed.
+=== DONE preflight 07/03/2026 04:32:26 ===

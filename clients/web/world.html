@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Koroki — her world</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #03040a; font-family: ui-sans-serif, system-ui, sans-serif; }
+      #world-canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+
+      /* ── Intro: "entering her place" ─────────────────────────────────── */
+      #intro { position: fixed; inset: 0; z-index: 40; pointer-events: none; }
+      #intro .panel {
+        position: absolute; top: 0; height: 100%; width: 50%;
+        background: linear-gradient(180deg, #04050c, #0a0c18);
+        transition: transform 2.2s cubic-bezier(0.7, 0, 0.2, 1);
+        box-shadow: 0 0 80px 10px rgba(33, 230, 255, 0.06);
+      }
+      #intro .panel.left { left: 0; }
+      #intro .panel.right { right: 0; }
+      #intro.open .panel.left { transform: translateX(-100%); }
+      #intro.open .panel.right { transform: translateX(100%); }
+      #intro .door-glow {
+        position: absolute; left: 50%; top: 0; height: 100%; width: 2px;
+        transform: translateX(-50%);
+        background: linear-gradient(180deg, transparent, #21e6ff, #ff2d92, transparent);
+        filter: blur(2px); opacity: 0.0; transition: opacity 0.8s ease;
+      }
+      #intro.armed .door-glow { opacity: 0.9; }
+      #intro.open .door-glow { opacity: 0; transition: opacity 1.2s ease; }
+      /* Her intro key-art: full-bleed portrait on the title screen, above the doors,
+         below the title text. Dissolves into the living world on enter. */
+      /* landscape scene-art of her — full-bleed, fills the screen */
+      #intro-art {
+        position: absolute; inset: 0; z-index: 2;
+        background: #05060d url("./assets/world/intro_koroki.png?v=11") center center / cover no-repeat;
+        transition: opacity 1.4s ease;
+      }
+      #intro-art::after {
+        content: ""; position: absolute; inset: 0;
+        background: linear-gradient(180deg, rgba(5,6,13,0.25) 0%, rgba(5,6,13,0) 32%, rgba(5,6,13,0.5) 80%, rgba(5,6,13,0.82) 100%);
+      }
+      #intro.open #intro-art { opacity: 0; }
+      #title {
+        position: fixed; inset: 0; z-index: 41; display: grid; place-content: end center;
+        padding-bottom: 11vh; text-align: center; pointer-events: none; opacity: 0;
+        transition: opacity 1.1s ease, transform 1.1s ease; transform: translateY(8px);
+      }
+      #title.show { opacity: 1; transform: translateY(0); }
+      #title h1 {
+        font-size: clamp(40px, 9vw, 140px); font-weight: 800; letter-spacing: 0.18em;
+        color: #f3ecff; text-shadow: 0 0 24px rgba(155, 92, 255, 0.55), 0 0 60px rgba(33, 230, 255, 0.3);
+      }
+      #title p { margin-top: 10px; color: #8aa0bd; letter-spacing: 0.4em; font-size: 13px; text-transform: uppercase; }
+      #skip {
+        position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%); z-index: 42;
+        color: #b9c6d8; font: 12px ui-monospace, monospace; letter-spacing: 0.18em;
+        pointer-events: auto; cursor: pointer; text-transform: uppercase;
+        animation: skippulse 2.4s ease-in-out infinite;
+      }
+      @keyframes skippulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 0.95; } }
+
+      /* ── HUD + nav ───────────────────────────────────────────────────── */
+      #hud {
+        position: fixed; top: 14px; left: 16px; z-index: 10;
+        font: 12px/1.5 ui-monospace, monospace; color: #9fb3c8;
+        background: rgba(8, 10, 20, 0.5); border: 1px solid rgba(120, 160, 220, 0.18);
+        border-radius: 10px; padding: 10px 12px; backdrop-filter: blur(6px);
+        pointer-events: none; min-width: 180px;
+      }
+      #hud b { color: #e6d8ff; font-weight: 600; } #hud .k { color: #6f7f95; }
+      #nav {
+        position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); z-index: 10;
+        display: flex; align-items: center; gap: 18px; color: #b9c6d8;
+        font: 13px ui-monospace, monospace; letter-spacing: 0.12em;
+        background: rgba(8, 10, 20, 0.5); border: 1px solid rgba(120, 160, 220, 0.18);
+        border-radius: 999px; padding: 8px 18px; backdrop-filter: blur(6px);
+      }
+      #nav .arrow { cursor: pointer; color: #cfe6ff; font-size: 18px; user-select: none; opacity: 0.85; }
+      #nav .arrow:hover { color: #fff; }
+      #nav #room-name b { color: #e6d8ff; }
+      #nav #she-here { color: #21e6ff; font-size: 11px; }
+      #status { position: fixed; bottom: 14px; left: 16px; z-index: 10; font: 11px ui-monospace, monospace; color: #5a6b80; }
+      .hidden { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <canvas id="world-canvas"></canvas>
+
+    <div id="intro" class="armed">
+      <div class="panel left"></div>
+      <div class="panel right"></div>
+      <div class="door-glow"></div>
+      <div id="intro-art"></div>
+    </div>
+    <div id="title"><h1>KOROKI</h1><p>her world</p></div>
+    <div id="skip">click anywhere / press space to enter ›</div>
+
+    <div id="hud">
+      <div><span class="k">time </span><b id="hud-time">—</b></div>
+      <div><span class="k">weather </span><b id="hud-weather">—</b></div>
+      <div><span class="k">she is </span><b id="hud-presence">—</b></div>
+      <div><span class="k">station </span><b id="hud-station">—</b></div>
+      <div><span class="k">mood </span><b id="hud-mood">—</b></div>
+      <div><span class="k">audio </span><b id="hud-mute">on</b> <span class="k">(m)</span></div>
+    </div>
+    <div id="nav">
+      <span class="arrow" id="nav-left">‹</span>
+      <span id="room-name"><b>—</b></span>
+      <span id="she-here"></span>
+      <span class="arrow" id="nav-right">›</span>
+    </div>
+    <div id="status">initializing…</div>
+
+    <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
+    <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display/dist/cubism4.min.js"></script>
+    <script src="./world.js?v=17" type="module"></script>
+  </body>
+</html>

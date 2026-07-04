@@ -1,0 +1,62 @@
+# ── Secrets ──────────────────────────────────────────────
+.env
+*.env.local
+
+# ── Virtual environments (NEVER track — the 44 GB .git lesson, 2026-07-04) ──
+.venv/
+.venv_*/
+venv/
+node_modules/
+
+# ── Python junk ──────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# ── Local tools & model stores (not Koroki source) ───────
+tools/ComfyUI/
+tools/models/
+ApplioV3.6.2/
+stockfish-windows-x86-64-avx2/
+checkpoints/
+voice_samples/
+unsloth_compiled_cache/
+神宫白子公皮/
+
+# ── Model weights & checkpoints, wherever they live ──────
+*.ckpt
+*.pth
+*.pt
+*.safetensors
+*.onnx
+*.gguf
+
+# ── Upstream clones (own git repos / own worlds) ─────────
+experiments/diffsinger/DiffSinger/
+experiments/diffsinger/SOFA/
+experiments/diffsinger/MakeDiffSinger/
+experiments/index-tts/checkpoints/
+experiments/index-tts/index-tts/
+experiments/cosyvoice/CosyVoice/
+experiments/cosyvoice/pretrained_models/
+
+# ── Runtime data, logs, trained weights ──────────────────
+data/
+logs/
+adapters/
+assets/
+
+# ── Media artifacts ──────────────────────────────────────
+*.wav
+*.mp3
+*.flac
+*.mp4
+*.webm
+
+# ── Session litter ───────────────────────────────────────
+.claude/worktrees/
+.cache/
+*.log

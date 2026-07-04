@@ -1,0 +1,10 @@
+Checking for processes using port 9000...
+Cannot overwrite variable PID because it is read-only or constant.
+At C:\Users\Shinn\Desktop\Koroki\scripts\cleanup_port_9000.ps1:11 char:5
++     $pid = $process.OwningProcess
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : WriteError: (PID:String) [], SessionStateUnauthorizedAccessException
+    + FullyQualifiedErrorId : VariableNotWritable
+ 
+Found process on port 9000 : powershell (PID: 31844)
+Killing process...

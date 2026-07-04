@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Koroki</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=M+PLUS+Rounded+1c:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="particles" aria-hidden="true">
+      <div class="particle" style="left:8%;animation-duration:18s;animation-delay:0s;width:3px;height:3px;"></div>
+      <div class="particle" style="left:18%;animation-duration:22s;animation-delay:3s;width:2px;height:2px;"></div>
+      <div class="particle" style="left:33%;animation-duration:16s;animation-delay:7s;width:4px;height:4px;"></div>
+      <div class="particle" style="left:49%;animation-duration:25s;animation-delay:1s;width:2px;height:2px;"></div>
+      <div class="particle" style="left:62%;animation-duration:19s;animation-delay:11s;width:3px;height:3px;"></div>
+      <div class="particle" style="left:74%;animation-duration:21s;animation-delay:5s;width:2px;height:2px;"></div>
+      <div class="particle" style="left:85%;animation-duration:17s;animation-delay:9s;width:4px;height:4px;"></div>
+      <div class="particle" style="left:93%;animation-duration:23s;animation-delay:2s;width:2px;height:2px;"></div>
+    </div>
+
+    <main class="app-shell">
+      <div class="page-veil veil-top" aria-hidden="true"></div>
+      <div class="page-veil veil-bottom" aria-hidden="true"></div>
+
+      <header class="topbar">
+        <div class="brand-lockup">
+          <p class="brand-mark">Koroki</p>
+        </div>
+        <div class="top-actions">
+          <button id="menu-toggle" type="button" class="menu-toggle" aria-label="Open navigation menu" aria-expanded="false">
+            <span></span><span></span><span></span>
+          </button>
+        </div>
+      </header>
+
+      <aside id="menu-drawer" class="menu-drawer" aria-hidden="true">
+        <div class="menu-panel">
+          <div class="menu-head">
+            <div>
+              <p class="menu-label">Court menu</p>
+              <h2 id="menu-title" class="menu-title">Guest access</h2>
+            </div>
+            <button id="menu-close" type="button" class="menu-close" aria-label="Close menu">×</button>
+          </div>
+
+          <div id="guest-menu" class="menu-section">
+            <p class="menu-copy">Enter quietly and keep your place in Koroki's court.</p>
+            <div class="auth-stack">
+              <form id="login-form" class="auth-form">
+                <p class="auth-title">Login</p>
+                <label class="auth-field">
+                  <span>Username</span>
+                  <input id="login-username" name="username" type="text" autocomplete="username" required />
+                </label>
+                <label class="auth-field">
+                  <span>Password</span>
+                  <input id="login-password" name="password" type="password" autocomplete="current-password" required />
+                </label>
+                <button id="login-button" type="submit" class="nav-button">Login</button>
+              </form>
+              <form id="signup-form" class="auth-form auth-form-emphasis">
+                <p class="auth-title">Sign Up</p>
+                <label class="auth-field">
+                  <span>Username</span>
+                  <input id="signup-username" name="username" type="text" autocomplete="username" required />
+                </label>
+                <label class="auth-field">
+                  <span>Email</span>
+                  <input id="signup-email" name="email" type="email" autocomplete="email" />
+                </label>
+                <label class="auth-field">
+                  <span>Password</span>
+                  <input id="signup-password" name="password" type="password" autocomplete="new-password" required />
+                </label>
+                <button id="signup-button" type="submit" class="nav-button nav-button-primary">Sign Up</button>
+              </form>
+            </div>
+          </div>
+
+          <div id="member-menu" class="menu-section menu-section-hidden">
+            <div class="profile-card">
+              <p id="profile-name" class="profile-name">Koroki guest</p>
+              <p id="profile-note" class="profile-note">Signed in</p>
+            </div>
+            <ul class="menu-links">
+              <li><button id="btn-profile" type="button" class="menu-link">Profile</button></li>
+              <li><button id="btn-voice-history" type="button" class="menu-link">Voice History</button></li>
+              <li><button id="btn-relationship" type="button" class="menu-link">Relationship Stat</button></li>
+            </ul>
+            <button id="logout-button" type="button" class="nav-button">Log Out</button>
+          </div>
+          <p id="auth-feedback" class="auth-feedback" aria-live="polite"></p>
+        </div>
+      </aside>
+
+      <section class="experience-shell">
+
+        <!-- LEFT: Presence panel -->
+        <aside class="whisper-card">
+          <p class="whisper-label">Presence</p>
+          <div class="status-stack">
+            <span id="service-status" class="status-pill status-pending">Checking service…</span>
+            <span id="model-status" class="status-pill status-muted">Loading stage…</span>
+            <span id="voice-status" class="status-pill status-muted">Voice idle</span>
+          </div>
+          <div class="presence-divider"></div>
+          <div class="presence-state">
+            <p class="presence-state-label">State</p>
+            <p id="presence-energy" class="presence-energy-text">—</p>
+          </div>
+          <div class="presence-divider"></div>
+          <div class="presence-state">
+            <p class="presence-state-label">Emotion</p>
+            <p id="presence-emotion-text" class="presence-emotion-text">idle</p>
+          </div>
+        </aside>
+
+        <!-- CENTER: Avatar + response -->
+        <section class="stage-column">
+          <div class="floating-copy">
+            <p class="floating-tag">A private court of frost, silver, and quiet affection</p>
+            <p class="floating-copy-text">Write to her only once. Let the answer arrive as breath, tone, and presence.</p>
+          </div>
+
+          <div class="avatar-stage">
+            <div class="avatar-frame" id="avatar-frame">
+              <div class="frame-corner frame-corner-tl" aria-hidden="true"></div>
+              <div class="frame-corner frame-corner-tr" aria-hidden="true"></div>
+              <div class="frame-corner frame-corner-bl" aria-hidden="true"></div>
+              <div class="frame-corner frame-corner-br" aria-hidden="true"></div>
+              <canvas id="live2d-canvas"></canvas>
+              <img
+                id="model-preview"
+                src="/assets/live2d/苹果小狐狸/a41b2cb8b0fee8e6320ea95b6731ba43.png"
+                alt="Koroki Live2D preview"
+              />
+              <div class="stage-glow" id="stage-glow" aria-hidden="true"></div>
+              <div class="avatar-overlay">
+                <div id="stage-mode" class="overlay-chip">Stage booting</div>
+                <div id="emotion-readout" class="overlay-chip overlay-emotion">Emotion: idle</div>
+              </div>
+            </div>
+          </div>
+
+          <div id="response-area" class="response-area" aria-live="polite">
+            <p id="response-text" class="response-text"></p>
+            <button id="play-latest-audio" type="button" class="replay-button" disabled>↺ Play again</button>
+          </div>
+        </section>
+
+        <!-- RIGHT: Mood panel -->
+        <aside class="account-rail">
+          <div class="rail-card">
+            <p class="rail-label">Mood</p>
+            <p id="emotion-chip" class="emotion-chip">idle</p>
+            <div class="mood-bars">
+              <div class="mood-row">
+                <span class="mood-dim-label">Warmth</span>
+                <div class="mood-bar"><div id="bar-warmth" class="mood-fill mood-fill-warmth" style="width:50%"></div></div>
+              </div>
+              <div class="mood-row">
+                <span class="mood-dim-label">Intensity</span>
+                <div class="mood-bar"><div id="bar-intensity" class="mood-fill mood-fill-intensity" style="width:50%"></div></div>
+              </div>
+              <div class="mood-row">
+                <span class="mood-dim-label">Arousal</span>
+                <div class="mood-bar"><div id="bar-arousal" class="mood-fill mood-fill-arousal" style="width:40%"></div></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="rail-card rail-card-small">
+            <p class="rail-label">Relationship</p>
+            <p id="relationship-display" class="relationship-score-display">—</p>
+            <div class="mood-bar" style="margin-top:10px">
+              <div id="bar-relationship" class="mood-fill mood-fill-relationship" style="width:0%"></div>
+            </div>
+          </div>
+
+          <div class="rail-card rail-card-small">
+            <p class="rail-label">Voice</p>
+            <p id="voice-detail" class="voice-detail">Waiting for her voice.</p>
+          </div>
+        </aside>
+      </section>
+
+      <form id="composer-form" class="composer-shell">
+        <input id="user-id" type="hidden" value="web_guest" />
+        <input id="relationship-score" type="hidden" value="60" />
+        <input id="is-owner" type="hidden" value="false" />
+        <input id="message-input" type="text" placeholder="Speak to her…" autocomplete="off" />
+        <button id="send-button" type="submit" class="send-button" aria-label="Send message">Send</button>
+      </form>
+
+      <audio id="latest-audio" class="sr-only"></audio>
+      <div id="transcript" class="sr-only" aria-hidden="true"></div>
+      <button id="clear-transcript" type="button" class="sr-only">Clear transcript</button>
+      <span id="relationship-score-value" class="sr-only">60</span>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
+    <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display/dist/cubism4.min.js"></script>
+    <script src="./app.js?v=5" type="module"></script>
+  </body>
+</html>

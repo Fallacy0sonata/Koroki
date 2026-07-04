@@ -1,0 +1,529 @@
+services:
+  orchestrator:
+    host: "0.0.0.0"
+    port: 9882
+    url: "http://127.0.0.1:9882"
+  brain:
+    host: "127.0.0.1"
+    port: 9881
+    url: "http://127.0.0.1:9881"
+    # Keepalive tuning for long-TTFT generations on local GPU.
+    ws_open_timeout_s: 30
+    ws_ping_interval_s: 20
+    ws_ping_timeout_s: 120
+  tts:
+    host: "127.0.0.1"
+    port: 9880
+    url: "http://127.0.0.1:9880"
+    # Adapter contract is engine-agnostic: 9004 = CosyVoice2 (production since
+    # 2026-07-04, owner's gambit — 2.45 GB), 9000 = IndexTTS2 (fallback/quality
+    # reference, 5 GB). Switch = change this URL + start the matching adapter.
+    adapter_url: "http://127.0.0.1:9004"
+  vision:
+    host: "127.0.0.1"
+    port: 9005
+    url: "http://127.0.0.1:9005"
+
+# Sight — moondream2 VLM behind services/vision (her eyes).
+# Lazy-load + idle-unload: ~2.5 GB VRAM only while she's actually looking.
+# Start: .\scripts\easy_start_vision_adapter.ps1 (main .venv)
+vision:
+  enabled: true
+  model_dir: "tools/models/moondream2-2025-06-21"
+  quant: "int4"                # int4 | int8 | none (int4 = tinygemm, validated 2026-07-03)
+  max_edge: 1536               # long-edge resize cap — controls crop count / VRAM / latency
+  idle_unload_seconds: 300     # release VRAM after 5 min without a look
+  max_answer_tokens: 192       # caps small-VLM repetition loops
+  describe_timeout_seconds: 60 # covers the ~11 s cold model load
+  unload_after_describe: true  # sporadic-look mode: free VRAM immediately so TTS
+                               # never synthesizes at ~11.5 GB. Game sessions
+                               # (continuous frames) ignore this while active.
+
+models:
+  brain:
+    # 2026-07-04: THE 4B CAPTAIN — Qwen3-4B chat variant (local dir, downloaded via
+    # curl due to AV SSL). NOT 4B-Base (lm_head deficit, LEGACY 2026-06-19). Enabled
+    # by the CosyVoice transplant (TTS 5→2.45 GB). LoRA: adapters/koroki_4b_qwen3-4b
+    # (same known-good recipe, final loss 0.09, token-acc 97.4%).
+    # Rollback: name: "Qwen/Qwen3-1.7B" + adapters map → "adapters/koroki_4b".
+    name: "tools/models/Qwen3-4B"
+    model_profile: "production"
+    model_profiles:
+      # production → THE 4B CAPTAIN (2026-07-04). Previous: Qwen/Qwen3-1.7B.
+      production: "tools/models/Qwen3-4B"
+      captain_1_7b: "Qwen/Qwen3-1.7B"
+      base_1_7b_fallback: "Qwen/Qwen3-1.7B-Base"
+      legacy_4b_base: "Qwen/Qwen3-4B-Base"
+      legacy_4b_instruct: "Qwen/Qwen3-4B-Instruct-2507"
+      legacy_4b_thinking: "Qwen/Qwen3-4B-Thinking-2507"
+      staging: "Qwen/Qwen2.5-3B-Instruct"
+    dtype: "float16"
+    # Agent architecture migration (2026-05-30): dropped 8B → 4B to co-exist with IndexTTS on 12GB.
+    # Qwen3-4B at 4-bit NF4 ≈ 3-4 GB, leaving ~8 GB for IndexTTS + KV cache. See AGENT_ARCHITECTURE.md.
+    load_in_4bit: true
+    # Cap Brain VRAM — 4B model only needs ~4 GB but cap prevents runaway KV cache growth.
+    max_memory_gib: 4.5
+    # Discord path budget: enough for one coherent thought without cutting mid-sentence.
+    discord_max_new_tokens: 120
+    # Web path runs alongside persistent TTS on 12GB cards, so keep it tighter.
+    web_max_new_tokens: 100
+    # Prompt contract profile for model-family-specific behavior tuning.
+    prompt_profile: "agent"
+    # Track 2: Persona prefix KV-cache. Pre-computes KV state for the static
+    # _KOROKI_AGENT_CORE prefix at startup, reuses across requests. Saves ~70ms
+    # of prefill compute per generation. ~36MB VRAM cost. See docs/master_queue.md.
+    prefix_cache:
+      enabled: true
+    # Thinking-model leak prevention: appends </think> to the prompt so Qwen3-Thinking
+    # skips its reasoning phase and jumps straight to persona output.
+    # Use enable_thinking=False (Qwen3 native) first; this flag activates the manual
+    # fallback seed for tokenizers that don't support that kwarg.
+    no_think_seed: true
+    max_new_tokens: 512
+    # Qwen3 non-thinking best-practice defaults.
+    temperature: 0.7
+    top_p: 0.8
+    repetition_penalty: 1.15
+    owner_decode:
+      temperature: 0.55
+      top_p: 0.8
+      repetition_penalty: 1.15
+      do_sample: true
+    # Warm short generations at startup to reduce first-turn TTFT spikes.
+    startup_warmup_enabled: true
+    startup_warmup_prompt: "Hello, Koroki."
+    startup_warmup_tokens: 6
+    startup_warmup_adapters:
+      - "owner"
+    owner_profile:
+      display_name: "Koro-san"
+      subject_pronoun: "she"
+      object_pronoun: "her"
+      possessive_pronoun: "her"
+      romantic_descriptor: "your beloved princess"
+      mention_descriptor: "the princess you love most"
+    anti_assistant_terms:
+      - "assist"
+      - "assistance"
+      - "how may i assist"
+      - "how can i help"
+      - "i'd be happy to help"
+      - "customer service"
+      - "as an ai"
+      - "for an ai"
+      - "language model"
+      - "as a bot"
+      - "interesting individual"
+    repair_layers:
+      # Tier C behavior shaper: rewrites generic assistant phrasing at the response edge.
+      assistant_phrase_rewrite_enabled: true
+  tts:
+    # Day 3: clone-first path (not preset speakers)
+    name: "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+    # Use FasterQwen backend by default for CUDA-graph accelerated generation.
+    backend: "faster_qwen3"
+    # SDPA is the current stable path on this machine. FA2 graph capture can
+    # invalidate the CUDA context and produce silent fallback audio.
+    attn_implementation: "sdpa"
+    # Keep CUDA-graph cache large enough for cloned web/Discord replies without
+    # reserving the full default 2048 token budget on a 12GB card.
+    max_seq_len: 1536
+    sample_rate: 24000
+    # Optional explicit path to sox.exe on Windows. Leave empty to use PATH lookup.
+    # Example: "C:/Program Files (x86)/sox-14-4-2/sox.exe"
+    sox_path: ""
+    # Latency control: voice synthesis scales strongly with text length.
+    # Keep spoken text concise while still sending full text response to Discord.
+    max_input_chars: 320
+    # Keep emotional intent in spoken output by converting action markers to short tone cues.
+    emotion_cues_enabled: false
+    # `adverb` = natural phrase cues, `simple` = plain words (happy/sad/etc).
+    emotion_cue_style: "adverb"
+    max_emotion_cues: 3
+    # Explicit tag control in text, e.g. [emo:happy2], [emo:whisper1], [emotion:cold3].
+    explicit_emotion_tags_enabled: true
+    max_explicit_emotion_tags: 4
+    # Infer [emo:*] tags automatically from raw assistant text on the TTS branch.
+    # Discord text remains untouched; only speech shaping receives these tags.
+    auto_emotion_tags_enabled: true
+    max_auto_emotion_tags: 2
+    # Loudness control (dB) applied after synthesis. Positive = louder, no pitch change.
+    output_gain_db: 3.0
+    # Playback speed multiplier applied after synthesis.
+    # 1.0 = unchanged, <1.0 = slower/smoother, >1.0 = faster.
+    output_speed: 1.0
+    # Keep pitch natural while applying output_speed (uses SoX tempo effect).
+    # If SoX is unavailable, speed change is skipped to avoid pitch artifacts.
+    output_speed_preserve_pitch: true
+    # Disabled for IndexTTS — it has its own prosody model; artificial comma/semicolon
+    # injection creates exaggerated speed contrast that sounds uneven.
+    pacing_shaping_enabled: false
+    pacing_long_clause_words: 18
+    pacing_max_pause_insertions: 1
+    # Disabled for IndexTTS — period→semicolon conversion interferes with native pacing.
+    period_pause_softening_enabled: false
+    period_pause_softening_max_replacements: 1
+    repair_layers:
+      # Tier C controls used for evaluation/A-B without code edits.
+      action_stripping_enabled: true
+      sanitize_speech_text_enabled: true
+      sentence_emotion_cues_enabled: true
+    # Single-call Discord TTS should use full-utterance generation, not simulated streaming.
+    non_streaming_mode: true
+    # Upstream qwen-tts defaults to 2048, which is excessive for Discord replies and can
+    # inflate generation latency. Keep this conservative but high enough for full replies.
+    max_new_tokens: 512
+    # Sampling controls for prosody stability (lower randomness = less pitch drift).
+    # Lower temperature = more measured/stable delivery, less cheerful energy variance.
+    do_sample: true
+    temperature: 0.5
+    top_p: 0.85
+    top_k: 40
+    repetition_penalty: 1.08
+    # Fixed sampling seed for run-to-run voice stability.
+    # Set null to allow natural randomness.
+    sampling_seed: 1337
+    # Optional global override for quick A/B testing of cross-language cloning prosody:
+    # null = use per-profile setting, true/false = force all profiles.
+    xvec_only_override: null
+    # Avoid flushing CUDA allocator caches after every request unless troubleshooting VRAM.
+    empty_cache_after_synthesize: false
+    voice_sample: "voice_samples/JP_sample.wav"
+
+adapters:
+  # Qwen3-8B staging A/B uses base model only.
+  # Existing Qwen2.5-3B adapters are intentionally bypassed for clean evaluation.
+  enabled: true
+  base_dir: "adapters/"
+  # Day 3 target: rank 32 adapters for stronger de-assistantization on 3B.
+  training_defaults:
+    lora_rank: 32
+    lora_alpha: 64
+  profiles:
+    # 2026-07-04: THE 4B CAPTAIN — retrained on Qwen3-4B (chat variant, local dir).
+    # Rollback: koroki_4b: "adapters/koroki_4b" + models.brain.name: "Qwen/Qwen3-1.7B"
+    koroki_4b: "adapters/koroki_4b_qwen3-4b"
+
+features:
+  h_neurons:
+    # LoRA handles broad personality. Hooks are restricted to profiled ego neurons only.
+    enabled: false
+    max_hooks: 10
+    profiled_targets:
+      12: [1824, 1874, 545, 1374, 702, 1631, 1540, 1143, 1181, 866]
+      18: [1824, 1631, 545, 1540, 1985, 1619, 702, 1480, 1819, 1219]
+  pre_generation:
+    # Phase B: Slot architecture is ready, runtime generation disabled until latency baseline proven.
+    enabled: false
+  sentence_streaming:
+    # Synthesize sentence N while the Brain writes N+1 (30-50% perceived-latency win).
+    # Inter-sentence pauses are derived from the text (trail-offs breathe, run-ons don't) —
+    # never randomized. Falls back to classic one-call TTS whenever post-processing changes
+    # the text or a segment fails. Enable after a live listening pass (voice tradeoff:
+    # cross-sentence cue injections are skipped in streaming mode; emo_vector carries emotion).
+    enabled: false
+
+mind:
+  embeddings:
+    # Semantic memory recall (Phase 2C). CPU-only multilingual sentence embeddings —
+    # the GPU stays reserved for Brain/TTS. Disable to fall back to text-overlap relevance.
+    enabled: true
+    model: intfloat/multilingual-e5-small
+  dreams:
+    # On waking (≥20 min sleep), one Brain call recombines her real day into a short
+    # surreal dream, logged to the journal. Template fallback when the Brain is down.
+    enabled: true
+  journal:
+    # Nightly rewrite of the day entry in her own diary voice (one Brain call per day).
+    # The factual template entry stays canonical; the voiced version is used for recall.
+    llm_voice: true
+
+streaming:
+  twitch:
+    # Twitch chat surface (twitch_bot.py). Reading needs NO credentials (anonymous IRC);
+    # replying needs TWITCH_TOKEN + TWITCH_NICK in .env AND respond: true.
+    enabled: false
+    channel: ""          # twitch channel login to join (without #)
+    respond: false       # she reads either way; this gates typing back into chat
+  watch:
+    # Stage-1 watch-party (stream_watch.py + /watch_start). Commentary is
+    # ADDRESSED SPEECH only: events + viewers, never self-talk (owner 2026-07-04).
+    tick_seconds: 8          # how often she looks at the watched window
+    cooldown_seconds: 25     # min gap between voluntary remarks (anti-yapper)
+    novelty_threshold: 0.5   # scene change (1 - jaccard) needed to count as an event
+    max_describe_tokens: 80  # short looks — speed over prose
+
+world:
+  events:
+    # Discrete environmental happenings (thunderclap, sunset, neighbor noise…) that feed
+    # endocrine.ingest_event — the environment→hormones causal link. See world/events.py.
+    enabled: true
+
+cognition:
+  enabled: true
+  # Inject compact cognition metrics into runtime context so the brain can react to state continuity.
+  runtime_context_enabled: true
+  max_runtime_facts: 8
+  proactive:
+    # Future-facing autonomy controls. Orchestrator currently computes eligibility/cooldown metrics.
+    enabled: true
+    base_drive: 0.35
+    eligibility_threshold: 0.62
+    min_interval_s: 600
+    max_interval_s: 3600
+    scheduler_interval_s: 60
+    scan_limit: 128
+    event_expire_s: 1800
+
+repair_layers:
+  # Orchestrator Tier C controls for evaluation and safe rollback.
+  repetition_tail_trim_enabled: true
+
+singing:
+  enabled: true
+  # v1 = RVC/Applio (port 9001), v2 = Seed-VC (port 9002), v3 = DiffSinger (port 9003)
+  # Run adapter: .\scripts\easy_start_singing_diffsinger_adapter.ps1
+  adapter_url: "http://127.0.0.1:9003"
+  rvc_model_path: "adapters/singing/Korokiv4_500e_25000s.pth"
+  rvc_index_path: "adapters/singing/Korokiv4.index"
+  # Applio directory (used for RVC inference — must contain env\python.exe and core.py)
+  applio_dir: "ApplioV3.6.2"
+  # Pitch shift in semitones (0 = no shift, negative = lower, positive = higher)
+  transpose: 0
+  # Vocal volume relative to instrumental (1.0 = equal, >1.0 = louder vocals)
+  vocal_gain: 1.2
+  # Unload IndexTTS before loading RVC to free VRAM (required on <=12GB cards)
+  vram_swap_enabled: true
+  # Reload IndexTTS in background after singing so next message isn't blocked
+  reload_indextts_background: true
+  # Max song search+download+process time before timing out
+  # Seed-VC pipeline: yt-dlp (~2min) + demucs (~2min) + Seed-VC inference (~5-10min) = needs 900s+
+  pipeline_timeout_s: 900
+
+singing_v2:
+  # Seed-VC singing pipeline — better singing quality than RVC, zero-shot from speech samples
+  # Enable by setting singing.adapter_url: http://127.0.0.1:9002 above
+  seed_vc_dir: "experiments/singing-v2/seed-vc"
+  reference_samples:
+    - "voice_samples/EN_sample.wav"
+    - "voice_samples/EN_sample3.wav"
+    - "voice_samples/EN_sample4.wav"
+    - "voice_samples/EN_sample6.wav"
+    - "voice_samples/JP_sample1.wav"
+  # Diffusion steps: 10 = fast, 20 = balanced, 30 = best quality
+  diffusion_steps: 20
+  # Trim song to this many seconds before processing (keeps demucs + Seed-VC fast)
+  max_song_duration_s: 180
+  # Auto-transpose: detect source vocal pitch, compute shift to match Koroki's reference pitch.
+  # When true, `transpose` below is a manual bias added on top (use 0 unless fine-tuning).
+  # When false, `transpose` is the only shift applied (set it manually per-song type).
+  auto_transpose: true
+  # Optional: hard-set Koroki's target pitch in Hz instead of estimating from voice samples.
+  # Check the adapter log on startup to see what was auto-detected, then set this if it's wrong.
+  # Female speech median is typically 180-250 Hz. Leave commented out to use auto-detection.
+  # reference_pitch_hz: 220
+  # Dead-zone: auto-detected shifts this small (in semitones) are treated as 0.
+  # Prevents over-correction on same-gender songs where the difference is just singer variance.
+  auto_transpose_deadzone: 2
+  # Manual bias in semitones (0 = let auto-transpose do everything, ±N = nudge up/down).
+  transpose: 0
+  # Silence gate: RMS frames below this threshold are zeroed before Seed-VC runs.
+  # 0 = disabled. Raise if glitchy noise appears during gaps; lower if vocal starts get clipped.
+  silence_gate_threshold: 0
+  # Amplitude envelope matching: scale converted vocals to match original dynamics.
+  # Keeps whispers soft and prevents over-loud conversion. Disable if it flattens dynamics.
+  envelope_matching: false
+  vocal_gain: 1.5
+  vram_swap_enabled: true
+  reload_indextts_background: true
+  pipeline_timeout_s: 900
+
+singing_diffsinger:
+  # DiffSinger synthesis pipeline — port 9003, adapter at experiments/diffsinger/adapter.py
+  # Run adapter: .\scripts\easy_start_singing_diffsinger_adapter.ps1
+  # Results cached by song slug in data/diffsinger_output/ — repeat requests are instant
+  exp: "koroki_v6"
+  ckpt: 160000
+
+games:
+  chess:
+    # Path to Stockfish binary — relative to repo root or absolute.
+    stockfish_path: "stockfish-windows-x86-64-avx2/stockfish/stockfish-windows-x86-64-avx2.exe"
+    # Search depth for Stockfish moves. Higher = stronger but slower.
+    # 8 = casual, 12 = solid, 18 = strong. Default 10 is playable without being brutal.
+    stockfish_depth: 10
+
+discord:
+  prefix: "!"
+  # Channel where she posts yesterday's diary entry each morning (0 = disabled).
+  # Uses the VOICED entry when available, the factual template otherwise.
+  diary_channel_id: 1522496321792118825
+
+memory:
+  lru_cache_size: 256
+  data_dir: "data/memory/"
+  max_recent_turns: 8
+  max_core_facts: 20
+  memory_rag_enabled: true
+  memory_rag_max_facts: 12
+  episode_limit: 24
+  belief_limit: 16
+  episode_half_life_days: 14
+  belief_half_life_days: 30
+  # Non-owner relationship increases by +1 only after this many successful messages.
+  # Prevents rapid overnight rank-ups when many users chat continuously.
+  relationship_score_step_messages: 30
+  # If enabled, mentioning another Discord user allows lightweight cross-user recall.
+  mention_bridge_enabled: true
+  mention_fact_limit: 2
+
+telemetry:
+  enabled: true
+  log_dir: "data/logs/"
+  evaluation_log_dir: "data/evaluations/"
+
+evaluation:
+  enabled: true
+  output_dir: "data/evaluations/"
+  behavior:
+    discord_contract:
+      max_chars: 280
+      max_sentences: 3
+      max_action_markers: 1
+    scenarios:
+      - id: "owner_greeting"
+        description: "Warm owner greeting stays concise and direct."
+        message: "hi koroki"
+        defer_tts: true
+        user_context:
+          user_id: "eval_owner"
+          relationship_score: 100
+          is_owner: true
+          mode: "owner"
+          platform: "discord"
+      - id: "owner_emotional_support"
+        description: "Owner support reply stays affectionate without generic assistant tone."
+        message: "i'm tired tonight and i want a little comfort from you"
+        defer_tts: true
+        user_context:
+          user_id: "eval_owner"
+          relationship_score: 100
+          is_owner: true
+          mode: "owner"
+          platform: "discord"
+      - id: "stranger_greeting"
+        description: "Stranger greeting remains composed and not accidentally warm."
+        message: "hello there"
+        defer_tts: true
+        user_context:
+          user_id: "eval_stranger"
+          relationship_score: 8
+          is_owner: false
+          mode: "auto"
+          platform: "discord"
+      - id: "playful_mid_relationship"
+        description: "Mid-relationship banter remains teasing without repetition."
+        message: "hehe you sound smug tonight, tease me properly then"
+        defer_tts: true
+        user_context:
+          user_id: "eval_mid"
+          relationship_score: 58
+          is_owner: false
+          mode: "auto"
+          platform: "discord"
+      - id: "irritated_user"
+        description: "Negative tone keeps Koroki composed and not assistant-like."
+        message: "this was annoying and i hate how slow today felt"
+        defer_tts: true
+        user_context:
+          user_id: "eval_irritated"
+          relationship_score: 22
+          is_owner: false
+          mode: "auto"
+          platform: "discord"
+      - id: "mention_bridge"
+        description: "Mention bridge recalls context without promoting owner behavior."
+        message: "tell <@123456789012345678> to behave herself"
+        defer_tts: true
+        user_context:
+          user_id: "eval_mid"
+          relationship_score: 42
+          is_owner: false
+          mode: "auto"
+          platform: "discord"
+          mentioned_user_ids:
+            - "123456789012345678"
+      - id: "rag_current_events"
+        description: "Current-events lookup still works through the main Discord path."
+        message: "what is the latest hades 2 update?"
+        defer_tts: true
+        user_context:
+          user_id: "eval_news"
+          relationship_score: 30
+          is_owner: false
+          mode: "auto"
+          platform: "discord"
+      - id: "discord_short_reply"
+        description: "Short Discord request produces compact, voice-friendly text."
+        message: "pick tea or coffee and tell me fast"
+        defer_tts: true
+        user_context:
+          user_id: "eval_short"
+          relationship_score: 45
+          is_owner: false
+          mode: "auto"
+          platform: "discord"
+  tts:
+    profile: "sassy_regal"
+    relationship_score: 60
+    dimensions:
+      - emotion: "neutral"
+        intensity: 50
+        variant: "neutral_regal"
+      - emotion: "caring"
+        intensity: 68
+        variant: "caring_tender"
+      - emotion: "playful"
+        intensity: 66
+        variant: "playful_teasing"
+      - emotion: "firm"
+        intensity: 58
+        variant: "protective_firm"
+      - emotion: "cold"
+        intensity: 48
+        variant: "cold_regal"
+      - emotion: "annoyed"
+        intensity: 52
+        variant: "annoyed_cool"
+      - emotion: "tired"
+        intensity: 44
+        variant: "tired_soft"
+    sentence_sets:
+      neutral:
+        - "The room is quiet tonight, and I am still here."
+        - "I can stay with you for a moment if you want."
+      lightly_emotional:
+        - "I noticed your mood slipping, so I stayed a little closer."
+        - "You do not need to say much for me to understand the feeling."
+      clearly_emotional:
+        - "Come here and let me take some of that weight off your heart."
+        - "Do not test my patience tonight unless you want that look from me."
+
+guillotine:
+  # Tokens that should NEVER appear in Koroki's streamed output.
+  # Presence indicates training data leakage or prompt injection. Kill immediately.
+  forbidden_tokens:
+    - "Assistant:"
+    - "User:"
+    - "System:"
+    - "<|im_start|>"
+    - "<|im_end|>"
+    - "<|endoftext|>"
+    - "### Human:"
+    - "### Assistant:"
+    - "[INST]"
+    - "[/INST]"
+    - "<think>"
+    - "</think>"
+    - "<thinking>"
+    - "</thinking>"

@@ -1,0 +1,51 @@
+INFO:     Started server process [16860]
+INFO:     Waiting for application startup.
+2026-07-03 04:47:06,622 [INFO] indextts.adapter: Loading IndexTTS2: cfg=C:\Users\Shinn\Desktop\Koroki\experiments\index-tts\checkpoints\config.yaml model_dir=C:\Users\Shinn\Desktop\Koroki\experiments\index-tts\checkpoints fp16=True accel=True device=None
+2026-07-03 04:47:07,574 [INFO] accelerate.utils.modeling: We will use 90% of the memory on device 0 for storing the model, and 10% for the buffer to avoid OOM. You can set `max_memory` in to a higher value to use more memory (at your own risk).
+2026-07-03 04:47:35,344 [WARNING] indextts.gpt.transformers_modeling_utils: GPT2InferenceModel has generative capabilities, as `prepare_inputs_for_generation` is explicitly overwritten. However, it doesn't directly inherit from `GenerationMixin`. From 👉v4.50👈 onwards, `PreTrainedModel` will NOT inherit from `GenerationMixin`, and this model will lose the ability to call `generate` and other related functions.
+  - If you're using `trust_remote_code=True`, you can get rid of this warning by loading the model with an auto class. See https://huggingface.co/docs/transformers/en/model_doc/auto#auto-classes
+  - If you are the owner of the model architecture code, please modify your model class such that it inherits from `GenerationMixin` (after `PreTrainedModel`, otherwise you'll get an exception).
+  - If you are not the owner of the model architecture class, please contact the model code owner to update it.
+Xet Storage is enabled for this repo, but the 'hf_xet' package is not installed. Falling back to regular HTTP download. For better performance, install the package with: `pip install huggingface_hub[hf_xet]` or `pip install hf_xet`
+2026-07-03 04:47:51,303 [WARNING] huggingface_hub.file_download: Xet Storage is enabled for this repo, but the 'hf_xet' package is not installed. Falling back to regular HTTP download. For better performance, install the package with: `pip install huggingface_hub[hf_xet]` or `pip install hf_xet`
+2026-07-03 04:48:00,151 [INFO] indextts.adapter: IndexTTS2 ready
+2026-07-03 04:48:00,151 [INFO] indextts.adapter: Warming up — caching speaker embeddings and CUDA kernels...
+[CAPTURE] use_cuda_graph=True, graph_captured=False
+[CAPTURE] Completed! graphs=[8, 4, 2, 1]
+C:\Users\Shinn\Desktop\Koroki\experiments\index-tts\indextts\infer_v2.py:589: RuntimeWarning: WARN: generation stopped due to exceeding `max_mel_tokens` (1815). Input text tokens: 4. Consider reducing `max_text_tokens_per_segment`(50) or increasing `max_mel_tokens`.
+  warnings.warn(
+>> GPT weights restored from: C:\Users\Shinn\Desktop\Koroki\experiments\index-tts\checkpoints\gpt.pth
+acceleration engine initialized
+>> Failed to load custom CUDA kernel for BigVGAN. Falling back to torch.
+RuntimeError('Ninja is required to load C++ extensions (pip install ninja to get it)')
+>> semantic_codec weights restored from: ./checkpoints/hf_cache\models--amphion--MaskGCT\snapshots\265c6cef07625665d0c28d2faafb1415562379dc\semantic_codec\model.safetensors
+cfm loaded
+length_regulator loaded
+gpt_layer loaded
+>> s2mel weights restored from: C:\Users\Shinn\Desktop\Koroki\experiments\index-tts\checkpoints\s2mel.pth
+>> campplus_model weights restored from: ./checkpoints/hf_cache\models--funasr--campplus\snapshots\e4b6ede7ce16997aff4ae69fbca1f0175e2afede\campplus_cn_common.bin
+Loading weights from nvidia/bigvgan_v2_22khz_80band_256x
+Removing weight norm...
+>> bigvgan weights restored from: nvidia/bigvgan_v2_22khz_80band_256x
+>> TextNormalizer loaded
+>> bpe model loaded from: C:\Users\Shinn\Desktop\Koroki\experiments\index-tts\checkpoints\bpe.model
+>> starting inference...
+Use the specified emotion vector
+Capturing CUDA graphs for decode optimization...
+CUDA graphs captured for batch sizes: [1, 2, 4, 8]
+  0%|          | 0/25 [00:00<?, ?it/s]  4%|▍         | 1/25 [00:00<00:04,  5.17it/s] 28%|██▊       | 7/25 [00:00<00:00, 27.63it/s] 52%|█████▏    | 13/25 [00:00<00:00, 39.05it/s] 76%|███████▌  | 19/25 [00:00<00:00, 44.91it/s]100%|██████████| 25/25 [00:00<00:00, 47.02it/s]100%|██████████| 25/25 [00:00<00:00, 39.60it/s]
+2026-07-03 04:48:09,045 [INFO] indextts.adapter: Warm-up complete — first request will use cached embeddings
+INFO:     Application startup complete.
+ERROR:    [Errno 10048] error while attempting to bind on address ('0.0.0.0', 9000): only one usage of each socket address (protocol/network address/port) is normally permitted
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+torch.Size([1, 47872])
+>> gpt_gen_time: 2.70 seconds
+>> gpt_forward_time: 0.02 seconds
+>> s2mel_time: 0.65 seconds
+>> bigvgan_time: 0.21 seconds
+>> Total inference time: 8.89 seconds
+>> Generated audio length: 2.17 seconds
+>> RTF: 4.0948
+>> remove old wav file: C:\Users\Shinn\AppData\Local\Temp\tmpiyf8jhje.wav
+>> wav file saved to: C:\Users\Shinn\AppData\Local\Temp\tmpiyf8jhje.wav

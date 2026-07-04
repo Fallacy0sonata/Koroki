@@ -1,0 +1,1137 @@
+"""Top-level Substrate coordinator — the 60 Hz driver.
+
+Phase 0 P0-2 ships this with:
+
+* An Izhikevich population (homogeneous preset) built by
+  `neurons.state.NeuronState.allocate`.
+* A dense random topology built by `synapses.topology.build_random_topology`,
+  Dale's law enforced.
+* A single-step forward-Euler integrator (`neurons.izhikevich.step_population`).
+* A simple 3-subpop PAD readout (P0 "honest cheat" — documented; Phase 2
+  replaces with chemistry-derived readout).
+* An emotion-event ring so v1 events can be mirrored into the substrate
+  as external currents. Mapping is minimal in P0-2 (deterministic slice
+  per emotion name) and refined in P0-3 by `SubstrateAdapter.event_from_v1`.
+
+Later phases fill in: conductance synapses (P1), chemistry-driven PAD
+readout (P2), multi-compartment neurons (P3), structural plasticity (P4),
+sleep-chemistry regimes (P5a), and snapshot persistence (P4).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import math
+import time
+from collections import deque
+from typing import Any, Deque, Dict, List, Optional, Tuple
+
+import numpy as np
+
+from novafox.substrate.backends import select_backend
+from novafox.substrate.chemistry import (
+    ChemistryField,
+    ChemistryParams,
+    HormoneSystemShim,
+    readout_pad_from_global_mean,
+)
+from novafox.substrate.core.rng import SeededRNG
+from novafox.substrate.core.types import (
+    StepResult,
+    SubstrateConfig,
+    SubstrateReadout,
+)
+from novafox.substrate.glia import (
+    AstrocyteParams,
+    AstrocyteState,
+    MicrogliaParams,
+    MicrogliaState,
+    SpineParams,
+    allocate_spine_sizes,
+    apply_synaptic_scaling,
+    get_scaling_factor,
+    microglia_prune_weights,
+)
+from novafox.substrate.interoception import BodyState
+from novafox.substrate.neurons.compartments import (
+    add_axial_current_to_soma,
+    step_compartments,
+    tick_nmda_plateaus,
+)
+from novafox.substrate.plasticity import (
+    BCMParams,
+    STDPParams,
+    ThreeFactorParams,
+    TraceParams,
+    allocate_rate_ema,
+    allocate_traces,
+    apply_weight_update,
+    build_incoming_csr,
+    bump_post_on_spike,
+    bump_pre_on_spike,
+    compute_modulator_global,
+    compute_stdp_delta,
+    scale_delta_by_bcm,
+    step_traces_decay,
+    update_rate_ema,
+)
+from novafox.substrate.safety import (
+    CriticalityParams,
+    CriticalityState,
+    WeightNormParams,
+    WeightNormState,
+)
+from novafox.substrate.sleep import (
+    DEFAULT_REGIMES,
+    DreamNarrator,
+    DreamNarratorParams,
+    ExperienceBuffer,
+    RipplerParams,
+    RipplerState,
+    SleepMachineParams,
+    SleepMachineState,
+    SleepScalingParams,
+    SleepScalingState,
+    SleepState,
+    apply_regime_drift,
+    maybe_record_experience,
+)
+from novafox.substrate.neurons.izhikevich import step_population
+from novafox.substrate.neurons.state import NeuronState
+from novafox.substrate.neurons.types import IzhParams
+from novafox.substrate.synapses.conductance import (
+    ConductanceParams,
+    compute_conductance_current,
+    step_conductance,
+)
+from novafox.substrate.synapses.delay_queue import (
+    allocate_delay_ring,
+    deliver_spikes,
+    deliver_spikes_conductance,
+    drain_current_step,
+    drain_kicks_into_conductance,
+    ring_head_advance,
+)
+from novafox.substrate.synapses.gap_junctions import (
+    GapJunctionState,
+    apply_gap_junction_currents,
+    build_gap_junctions,
+)
+from novafox.substrate.synapses.release import (
+    deliver_spikes_with_vesicles,
+    replenish_vesicles,
+)
+from novafox.substrate.synapses.topology import (
+    DEFAULT_MAX_DELAY_STEPS,
+    build_random_topology,
+)
+
+
+# P0-2 PAD subpop sizes. Scaled down for very small populations.
+_PAD_SUBPOP_DEFAULT = 100
+
+# P0 "honest cheat" tanh scale: turns a firing-rate delta (Hz) into a PAD
+# axis value in [-1, 1]. Larger → less sensitive readout.
+_PAD_RATE_REFERENCE_HZ = 10.0
+_PAD_RATE_SCALE_HZ = 20.0
+
+# Emotion injection: current magnitude per unit intensity, and how many
+# frames the bump persists. Tuned so a mid-intensity event produces a
+# visible PAD shift at P0 scale.
+_EMOTION_CURRENT_SCALE = 50.0
+_EMOTION_BUMP_FRAMES = 2
+
+# Spike history ring (1 second at 60 Hz).
+_SPIKE_HISTORY_FRAMES = 60
+
+
+def _clamp_weights_inplace(weights_csr: Any, bound: float, backend: Any) -> None:
+    """Clamp ``weights_csr`` in-place to ``[-bound, bound]`` on any backend.
+
+    Used after glial synaptic scaling to keep the ±1.0 invariant that
+    the plasticity commit path enforces with ``w_min`` / ``w_max``.
+    Astrocyte scaling factors live in ``[0.5, 2.0]`` so a single
+    up-scaling pass can push any already-large weight past the bound.
+    """
+    name = getattr(backend, "name", "numpy")
+    if name == "torch":
+        weights_csr.clamp_(min=-bound, max=bound)
+        return
+    xp = backend.xp
+    weights_csr[...] = xp.clip(weights_csr, -bound, bound)
+
+
+class Substrate:
+    """Biophysical-substrate coordinator. Callable at 60 Hz from
+    `EmotionCore.update` once wired in P0-4.
+
+    The public surface is intentionally small:
+
+        substrate.step(dt_ms=...)
+        substrate.get_readout()
+        substrate.inject_emotion_event(emotion_type, intensity, context=None)
+        substrate.snapshot()
+
+    Internal subsystems (neurons, synapses, rng) are exposed as attributes
+    for tests but aren't part of the downstream contract.
+    """
+
+    def __init__(self, config: SubstrateConfig) -> None:
+        self.config = config
+        self.backend = select_backend(config.backend, config.device)
+        self.rng = SeededRNG(self.backend.name, config.seed)
+
+        self.params: IzhParams = IzhParams.preset(config.izh_preset)
+        self.neurons: NeuronState = NeuronState.allocate(
+            self.backend,
+            config.n_neurons,
+            self.params,
+            with_conductance=config.use_conductance_synapses,
+            with_compartments=config.use_multicompartment,
+        )
+        # P1-2 conductance parameters. Defaults are tuned for
+        # substep_count=1 stability (dt_ms ≈ 16.67); users running
+        # P1-3 sub-stepping can override via a future config surface.
+        self.conductance_params = ConductanceParams()
+        self.synapses, kind_host = build_random_topology(
+            n_neurons=config.n_neurons,
+            e_fraction=config.e_fraction,
+            p_connect=0.02,
+            seed=config.seed,
+            backend=self.backend,
+            with_vesicle_kinetics=config.vesicle_kinetics,
+        )
+        # Upload neuron-kind vector alongside the synapse build.
+        self.neurons.kind[...] = self.backend.from_host(kind_host)
+        self._kind_host: np.ndarray = kind_host  # cache for Dale's law checks
+
+        # P1-5 gap-junction topology. Built only when the feature flag
+        # is on; otherwise stays None so the kernel is a no-op at
+        # every call site.
+        self.gap_junctions: Optional[GapJunctionState] = None
+        if config.use_gap_junctions:
+            self.gap_junctions = build_gap_junctions(
+                kind_host=kind_host,
+                seed=config.seed,
+                backend=self.backend,
+            )
+
+        # --- Phase 4 plasticity (STDP + three-factor + BCM) ---
+        self.trace_params = TraceParams()
+        self.stdp_params = STDPParams()
+        self.three_factor_params = ThreeFactorParams()
+        self.bcm_params = BCMParams()
+        self.pre_trace: Optional[Any] = None
+        self.post_trace: Optional[Any] = None
+        self.delta_w: Optional[Any] = None
+        self.rate_ema: Optional[Any] = None
+        self.in_indptr: Optional[Any] = None
+        self.in_edge_ids: Optional[Any] = None
+        if config.use_plasticity and self.synapses.has_csr:
+            self.pre_trace, self.post_trace = allocate_traces(
+                self.synapses.n_synapses, self.backend,
+            )
+            self.delta_w = self.backend.from_host(
+                np.zeros(self.synapses.n_synapses, dtype=np.float32)
+            )
+            self.rate_ema = allocate_rate_ema(config.n_neurons, self.backend)
+            self.in_indptr, self.in_edge_ids = build_incoming_csr(
+                self.synapses.indptr,
+                self.synapses.indices,
+                config.n_neurons,
+                self.backend,
+            )
+
+        # --- Phase 4 glia (astrocytes + microglia + spines) ---
+        self.astrocyte_params = AstrocyteParams()
+        self.microglia_params = MicrogliaParams()
+        self.spine_params = SpineParams()
+        self.astrocytes: Optional[AstrocyteState] = None
+        self.microglia: Optional[MicrogliaState] = None
+        self.spine_sizes: Optional[Any] = None
+        if config.use_glia:
+            self.astrocytes = AstrocyteState.allocate(
+                config.n_neurons, self.backend, self.astrocyte_params,
+            )
+            if self.synapses.has_csr:
+                self.microglia = MicrogliaState.allocate(
+                    self.synapses.n_synapses, self.backend, self.microglia_params,
+                )
+                self.spine_sizes = allocate_spine_sizes(
+                    self.synapses.n_synapses, 1.0, self.backend,
+                )
+
+        # --- Phase 4 safety (criticality + weight-norm watchdog) ---
+        self.criticality: Optional[CriticalityState] = None
+        self.weight_norm_watchdog: Optional[WeightNormState] = None
+        if config.use_safety:
+            self.criticality = CriticalityState.allocate(CriticalityParams())
+            self.weight_norm_watchdog = WeightNormState.allocate(
+                WeightNormParams()
+            )
+
+        # --- Phase 5 sleep substrate ---
+        self.sleep: Optional[SleepMachineState] = None
+        self.experience_buffer: Optional[ExperienceBuffer] = None
+        self.rippler: Optional[RipplerState] = None
+        self.sleep_scaler: Optional[SleepScalingState] = None
+        self.dream_narrator: Optional[DreamNarrator] = None
+        if config.use_sleep:
+            self.sleep = SleepMachineState.allocate(SleepMachineParams())
+        if config.use_replay:
+            self.experience_buffer = ExperienceBuffer(max_size=200)
+            self.rippler = RipplerState(
+                params=RipplerParams(),
+                experience_buffer=self.experience_buffer,
+                _rng_seed=config.seed,
+            )
+        if config.use_sleep_scaling:
+            self.sleep_scaler = SleepScalingState(params=SleepScalingParams())
+        if config.use_dream_narrator:
+            self.dream_narrator = DreamNarrator(
+                params=DreamNarratorParams(),
+            )
+        self._sim_time_ms: float = 0.0
+
+        # PAD readout subpops. Three contiguous slices at the start of
+        # the population, each ~100 neurons (scaled down when N is tiny).
+        subpop = min(_PAD_SUBPOP_DEFAULT, max(1, config.n_neurons // 4))
+        self._pad_slices: Tuple[slice, slice, slice] = (
+            slice(0, subpop),
+            slice(subpop, 2 * subpop),
+            slice(2 * subpop, 3 * subpop),
+        )
+
+        # Spike history as a ring buffer of per-frame spike counts per
+        # PAD subpop. Used to compute firing rate in the readout. Stored
+        # host-side — it's only 3 ints per frame.
+        self._spike_history: Deque[Tuple[int, int, int]] = deque(
+            maxlen=_SPIKE_HISTORY_FRAMES
+        )
+
+        # Pending emotion bumps: list of (neuron_slice, remaining_frames,
+        # current_amount). Applied to i_ext at the top of each step.
+        self._pending_bumps: List[Tuple[slice, int, float]] = []
+
+        # Monotonic step counter for spike-time bookkeeping.
+        self._step_index: int = 0
+
+        # --- Phase 2 chemistry field + body state (P2-1..P2-4).
+        # Allocated only when use_chemistry=True. Ticked at 10 Hz
+        # (chemistry) and 1 Hz (body) — much slower than neural
+        # sub-steps, amortized across frames. ---
+        self.chemistry: Optional[ChemistryField] = None
+        self.hormones: Optional[HormoneSystemShim] = None
+        self.body: Optional[BodyState] = None
+        self._chemistry_tick_counter: int = 0
+        self._body_tick_counter: int = 0
+        if self.config.use_chemistry:
+            self.chemistry = ChemistryField.allocate(
+                grid_shape=self.config.chemistry_grid_shape,
+                params=ChemistryParams(),
+                backend=self.backend,
+            )
+            self.hormones = HormoneSystemShim(self.chemistry)
+            self.body = BodyState()
+
+        # --- Phase 1 delay queue (P1-1). Allocated only when enabled so
+        # P0 installs don't carry the extra memory. Ring shape is
+        # (max_delay_steps, n_neurons) float32. Read and write heads
+        # advance in lockstep each sub-step. ---
+        self._max_delay_steps: int = DEFAULT_MAX_DELAY_STEPS
+        self._delay_ring: Optional[Any] = None
+        self._delay_ring_e: Optional[Any] = None
+        self._delay_ring_i: Optional[Any] = None
+        self._delay_write_head: int = 0
+        self._delay_read_head: int = 0
+        if self.config.use_delay_queue:
+            if self.config.use_conductance_synapses:
+                # P1-2 routes kicks into E / I rings depending on the
+                # presynaptic neuron's kind. Two rings, one per lane.
+                self._delay_ring_e = allocate_delay_ring(
+                    self.backend, self._max_delay_steps, config.n_neurons
+                )
+                self._delay_ring_i = allocate_delay_ring(
+                    self.backend, self._max_delay_steps, config.n_neurons
+                )
+            else:
+                # P1-1 single signed-current ring.
+                self._delay_ring = allocate_delay_ring(
+                    self.backend, self._max_delay_steps, config.n_neurons
+                )
+
+    # --------------------------------------------------------------
+    # Public step / readout surface.
+    # --------------------------------------------------------------
+
+    def step(
+        self,
+        dt_ms: Optional[float] = None,
+        external_input: Optional[Dict[str, Any]] = None,
+    ) -> StepResult:
+        """Advance the substrate by one frame.
+
+        When ``substep_count > 1`` the frame is split into that many
+        equal sub-steps, with synaptic-input computation, neuron
+        integration, and spike-delivery re-run on each. This lets
+        conductance kinetics + per-synapse delays operate at a
+        biologically plausible sub-ms granularity without raising
+        the external 60 Hz contract above what downstream consumers
+        expect.
+
+        Args:
+            dt_ms: Frame duration in milliseconds. Falls back to
+                ``config.dt_ms`` (≈16.67 ms at 60 Hz) when None.
+            external_input: Reserved for future phases (perception
+                features, hormone scalars). Ignored in P0-2.
+
+        Returns:
+            StepResult summed across sub-steps.
+        """
+        t0 = time.perf_counter()
+        dt = float(dt_ms) if dt_ms is not None else float(self.config.dt_ms)
+        sub_steps = max(1, int(self.config.substep_count))
+        sub_dt = dt / sub_steps
+
+        self._apply_pending_bumps()
+
+        # Spikes per PAD-readout subpop, accumulated across all
+        # sub-steps of this frame. Without this, `_push_spike_history`
+        # would see only the *last* sub-step's spike vector and
+        # undercount by a factor of ~substep_count in dense regimes.
+        frame_subpop_counts = [0, 0, 0]
+        n_spikes_total = 0
+        for _ in range(sub_steps):
+            n_spikes_total += self._step_once(sub_dt, frame_subpop_counts)
+
+        self._push_spike_history_frame(frame_subpop_counts)
+        self._decay_ext_current()
+
+        # --- Phase 4 plasticity commit (runs at frame cadence, not
+        # sub-step cadence, so eligibility traces can be retroactively
+        # gated by late dopamine).
+        if self.config.use_plasticity and self.pre_trace is not None:
+            if self.chemistry is not None:
+                modulator = compute_modulator_global(
+                    self.chemistry, self.three_factor_params,
+                )
+            else:
+                modulator = 1.0
+            apply_weight_update(
+                self.synapses.weights_csr,
+                self.delta_w,
+                float(modulator),
+                self.backend,
+                eligibility_decay_factor=0.0,  # one-shot STDP commit
+                # Hard weight clamp — keeps plasticity bounded under
+                # sustained high activity. ±1.0 is much larger than
+                # the initial weight scale (~0.05), so there's plenty
+                # of room for learning without runaway.
+                w_min=-1.0,
+                w_max=1.0,
+            )
+
+        # --- Phase 4 glia slow tick (1 Hz): synaptic scaling +
+        # microglia pruning + spine updates. These are slow enough
+        # to run once per ~60 frames without impacting the main loop.
+        if (
+            self.config.use_glia
+            and self.astrocytes is not None
+            and self.microglia is not None
+        ):
+            self._glia_slow_tick_counter = getattr(
+                self, "_glia_slow_tick_counter", 0,
+            ) + 1
+            if self._glia_slow_tick_counter >= 60:
+                self._glia_slow_tick_counter = 0
+                # Astrocyte-driven synaptic scaling.
+                scaling = get_scaling_factor(
+                    self.astrocytes, self.astrocyte_params, self.backend,
+                )
+                apply_synaptic_scaling(
+                    self.synapses.indptr, self.synapses.indices,
+                    self.synapses.weights_csr, scaling, self.backend,
+                )
+                # Re-clamp to ±1.0 after scaling. Astrocyte factors can
+                # push up to ×2, so without this the plasticity clamp
+                # invariant (|w| ≤ 1.0 enforced by ``apply_weight_update``)
+                # leaks through the glia slow tick and weights drift out
+                # of range under sustained stimulus.
+                _clamp_weights_inplace(
+                    self.synapses.weights_csr, 1.0, self.backend,
+                )
+                # Microglia pruning of low-weight tagged synapses.
+                microglia_prune_weights(
+                    self.microglia, self.synapses.weights_csr,
+                    self.microglia_params, self.backend,
+                )
+
+        # --- Phase 4 safety slow tick (weight-norm watchdog) ---
+        # When the watchdog reports "emergency", close the loop: scale
+        # every synapse by 0.5 in one pass and re-clamp. This is the
+        # Tononi-style synaptic homeostasis escape hatch when regular
+        # plasticity regulation (BCM + astrocyte scaling + sleep
+        # downscaling) loses control under sustained stimulus. Without
+        # this, the watchdog is a passive observer — it reports drift
+        # but doesn't restrain it, and long-horizon runs blow up.
+        if (
+            self.config.use_safety
+            and self.weight_norm_watchdog is not None
+            and self.synapses.has_csr
+        ):
+            status = self.weight_norm_watchdog.tick(
+                self.synapses.weights_csr, self.backend,
+            )
+            if status == "emergency":
+                xp = self.backend.xp
+                if self.backend.name == "torch":
+                    self.synapses.weights_csr.mul_(0.5)
+                else:
+                    self.synapses.weights_csr[...] = (
+                        self.synapses.weights_csr * 0.5
+                    ).astype(self.synapses.weights_csr.dtype)
+                _clamp_weights_inplace(
+                    self.synapses.weights_csr, 1.0, self.backend,
+                )
+                # Also clamp membrane potential back into the
+                # physiological regime — neurons stuck at the ±1000
+                # sentinel can't spike again without this kick.
+                v_arr = self.neurons.v
+                if self.backend.name == "torch":
+                    v_arr.clamp_(min=-90.0, max=40.0)
+                else:
+                    v_arr[...] = xp.clip(v_arr, -90.0, 40.0)
+
+        # --- Phase 2 slow-tick subsystems ---
+        # Chemistry at 10 Hz (every 6 frames at 60 Hz), body at 1 Hz
+        # (every 60 frames). Both amortized — neither bottlenecks the
+        # 60 Hz loop.
+        if self.chemistry is not None:
+            self._chemistry_tick_counter += 1
+            if self._chemistry_tick_counter >= 6:
+                self.chemistry.tick(dt_s=self._chemistry_tick_counter * dt / 1000.0)
+                self._chemistry_tick_counter = 0
+
+        if self.body is not None and self.chemistry is not None:
+            self._body_tick_counter += 1
+            if self._body_tick_counter >= 60:
+                self.body.step(
+                    dt_s=self._body_tick_counter * dt / 1000.0,
+                    chemistry=self.chemistry,
+                )
+                self._body_tick_counter = 0
+
+        # --- Phase 5 sleep slow tick (1 Hz = every 60 frames) ---
+        if self.sleep is not None and self.chemistry is not None:
+            self._sleep_tick_counter = getattr(
+                self, "_sleep_tick_counter", 0,
+            ) + 1
+            if self._sleep_tick_counter >= 60:
+                tick_dt_s = self._sleep_tick_counter * dt / 1000.0
+                self.sleep.step(
+                    dt_ms=self._sleep_tick_counter * dt,
+                    chemistry=self.chemistry,
+                )
+                apply_regime_drift(
+                    chemistry=self.chemistry,
+                    state=self.sleep.state,
+                    regimes=DEFAULT_REGIMES,
+                    dt_s=tick_dt_s,
+                )
+                self._sleep_tick_counter = 0
+
+        # --- Phase 5 dream narration (slow tick) ---
+        if (
+            self.dream_narrator is not None
+            and self.sleep is not None
+            and self.chemistry is not None
+        ):
+            replay_count = (
+                self.rippler.total_events_triggered
+                if self.rippler is not None
+                else 0
+            )
+            self.dream_narrator.step(
+                dt_ms=dt,
+                sim_time_ms=self._sim_time_ms,
+                sleep_state=self.sleep.state,
+                chemistry=self.chemistry,
+                body=self.body,
+                active_replay_count=replay_count,
+            )
+
+        # --- Phase 5 experience capture (during AWAKE) ---
+        if (
+            self.experience_buffer is not None
+            and self.sleep is not None
+            and self.sleep.state == SleepState.AWAKE
+        ):
+            valence = float(self.get_readout().pad[0])
+            maybe_record_experience(
+                neurons=self.neurons,
+                step_index=self._step_index,
+                dt_ms=dt,
+                valence=valence,
+                buffer=self.experience_buffer,
+                interval_steps=60,
+            )
+
+        step_time_ms = (time.perf_counter() - t0) * 1000.0
+        mean_rate_hz = (
+            (n_spikes_total / max(1, self.config.n_neurons))
+            / max(1e-9, dt / 1000.0)
+        )
+        return StepResult(
+            n_spikes=int(n_spikes_total),
+            mean_rate_hz=float(mean_rate_hz),
+            step_time_ms=float(step_time_ms),
+        )
+
+    def _step_once(
+        self,
+        sub_dt_ms: float,
+        frame_subpop_counts: List[int],
+    ) -> int:
+        """One integration sub-step at ``sub_dt_ms``.
+
+        Runs synaptic input computation → neuron integration → spike
+        delivery for the next sub-step → ring-head advance.
+
+        Adds this sub-step's per-subpop spike counts into
+        ``frame_subpop_counts`` so the frame-level spike history
+        aggregates spikes fired during earlier sub-steps rather than
+        only sampling ``neurons.spiked`` at the final sub-step.
+        """
+        # P3-1: advance dendrite compartments BEFORE the soma so
+        # axial coupling sees the freshly-updated v_apical, v_basal.
+        if self.config.use_multicompartment and self.neurons.has_compartments:
+            step_compartments(self.neurons, sub_dt_ms, self.backend)
+            # P3-3: NMDA plateau detection on apical compartment.
+            tick_nmda_plateaus(self.neurons, sub_dt_ms, self.backend)
+
+        if self.config.use_delay_queue and self.config.use_conductance_synapses:
+            # P1-2: drain E/I rings, evolve dual-exp kinetics, then
+            # compute voltage-dependent I_syn from conductances.
+            self._compute_synaptic_input_conductance(sub_dt_ms)
+        elif self.config.use_delay_queue and self._delay_ring is not None:
+            # P1-1: drain signed-current ring directly into i_syn.
+            self._compute_synaptic_input_delayed()
+        else:
+            # P0: dense matmul.
+            self._compute_synaptic_input()
+
+        # P3-2: add dendrite → soma axial current on top of chemical-
+        # synaptic current. No-op when single-compartment.
+        if self.config.use_multicompartment and self.neurons.has_compartments:
+            add_axial_current_to_soma(
+                self.neurons, self.neurons.i_syn, self.backend,
+            )
+
+        n_spikes = step_population(
+            self.neurons, self.params, sub_dt_ms, self._step_index, self.backend
+        )
+        self._step_index += 1
+
+        # Accumulate per-subpop counts BEFORE spike delivery resets
+        # neuron state (though step_population only resets the
+        # spiked/v/u of neurons that actually fired this sub-step, so
+        # `neurons.spiked` still carries the 1s we want to count).
+        spiked_host = self.backend.to_host(self.neurons.spiked)
+        for i, sl in enumerate(self._pad_slices):
+            frame_subpop_counts[i] += int(spiked_host[sl].sum())
+
+        # --- Phase 4 plasticity: STDP + BCM per sub-step ---
+        # Order matters: decay → STDP reads OLD trace values →
+        # metaplasticity scales delta → bumps update traces for NEXT
+        # sub-step. Commit to weights runs at the frame boundary
+        # (see step()), not here.
+        if self.config.use_plasticity and self.pre_trace is not None:
+            step_traces_decay(
+                self.pre_trace, self.post_trace,
+                self.trace_params, sub_dt_ms, self.backend,
+            )
+            compute_stdp_delta(
+                indptr=self.synapses.indptr,
+                indices=self.synapses.indices,
+                pre_trace=self.pre_trace,
+                post_trace=self.post_trace,
+                spiked=self.neurons.spiked,
+                params=self.stdp_params,
+                out_delta_w=self.delta_w,
+                backend=self.backend,
+                in_indptr=self.in_indptr,
+                in_edge_ids=self.in_edge_ids,
+            )
+            update_rate_ema(
+                self.rate_ema, self.neurons.spiked,
+                sub_dt_ms, self.bcm_params, self.backend,
+            )
+            scale_delta_by_bcm(
+                self.delta_w, self.synapses.indices, self.rate_ema,
+                self.bcm_params, self.backend,
+            )
+            bump_pre_on_spike(
+                self.synapses.indptr, self.pre_trace,
+                self.neurons.spiked, self.trace_params, self.backend,
+            )
+            bump_post_on_spike(
+                self.synapses.indices, self.post_trace,
+                self.neurons.spiked, self.trace_params, self.backend,
+                in_indptr=self.in_indptr, in_edge_ids=self.in_edge_ids,
+            )
+
+        # --- Phase 4 glia: astrocyte calcium + firing-rate EMA ---
+        if self.config.use_glia and self.astrocytes is not None:
+            self.astrocytes.step(
+                sub_dt_ms / 1000.0, self.neurons.spiked, self.backend,
+            )
+
+        # --- Phase 4 safety: criticality spike-count ingest ---
+        if self.config.use_safety and self.criticality is not None:
+            self.criticality.tick(int(n_spikes))
+
+        # --- Phase 5 replay: ripple events during NREM ---
+        if self.rippler is not None and self.sleep is not None:
+            self.rippler.step(
+                dt_ms=sub_dt_ms,
+                simulation_time_ms=self._sim_time_ms,
+                sleep_state=self.sleep.state,
+                neurons=self.neurons,
+                backend=self.backend,
+            )
+
+        # --- Phase 5 NREM scaling: every sub-step (gate is internal) ---
+        if (
+            self.sleep_scaler is not None
+            and self.sleep is not None
+            and self.synapses.has_csr
+        ):
+            self.sleep_scaler.step(
+                dt_ms=sub_dt_ms,
+                sleep_state_is_nrem=(self.sleep.state == SleepState.NREM),
+                weights_csr=self.synapses.weights_csr,
+                backend=self.backend,
+            )
+
+        self._sim_time_ms += sub_dt_ms
+
+        if self.config.use_delay_queue:
+            # Deliver AFTER integrating so fresh spikes schedule
+            # relative to the current sub-step, then advance heads.
+            self._deliver_spikes_to_ring()
+            self._delay_write_head, self._delay_read_head = ring_head_advance(
+                self._delay_write_head,
+                self._delay_read_head,
+                self._max_delay_steps,
+            )
+            # P1-4 vesicle pool replenishment — once per sub-step.
+            if (
+                self.config.vesicle_kinetics
+                and self.synapses.has_vesicle_kinetics
+            ):
+                replenish_vesicles(
+                    vesicle_pool=self.synapses.vesicle_pool_size,
+                    vesicle_avail=self.synapses.vesicle_available,
+                    recovery_tau_ms=self.synapses.vesicle_recovery_tau_ms,
+                    dt_ms=sub_dt_ms,
+                    backend=self.backend,
+                    seed=(int(self.config.seed) * 7_919) + self._step_index,
+                )
+
+        return int(n_spikes)
+
+    def get_readout(self) -> SubstrateReadout:
+        """Return the current PAD readout and a provisional dominant
+        emotion estimate from nearest-prototype distance in PAD space.
+
+        Chooses PAD source by ``config.pad_source``:
+        * ``"chemistry"`` — when chemistry is allocated, derive PAD
+          from the chemistry field's global means via
+          ``readout_pad_from_global_mean``. This is the Phase 2
+          cutover path.
+        * ``"tanh_cheat"`` (default) — P0 3-subpop firing-rate →
+          tanh → PAD. Kept as fallback.
+        """
+        if (
+            self.config.pad_source == "chemistry"
+            and self.chemistry is not None
+        ):
+            raw = readout_pad_from_global_mean(self.chemistry)
+            pad: Tuple[float, float, float] = (
+                float(raw[0]), float(raw[1]), float(raw[2]),
+            )
+        else:
+            pad = self._compute_pad_readout()
+        dominant = self._nearest_emotion_prototype(pad)
+        valence = pad[0]
+        arousal = (pad[1] + 1.0) / 2.0
+        return SubstrateReadout(
+            pad=pad,
+            arousal=float(arousal),
+            valence=float(valence),
+            dominant_emotion=dominant,
+            emotion_probs={},
+        )
+
+    def inject_emotion_event(
+        self,
+        emotion_type: str,
+        intensity: float,
+        context: Optional[str] = None,
+    ) -> None:
+        """Mirror a v1 emotion event into the substrate as a transient
+        external-current bump on a deterministic "sensor" subpopulation.
+
+        The sensor slice is derived from a hash of the emotion name so
+        two instances of the substrate with the same config produce the
+        same mapping. Phase 0 P0-3 (`SubstrateAdapter`) is the primary
+        caller; P0-2 tests exercise this directly.
+        """
+        sensor_slice = self._emotion_sensor_slice(emotion_type)
+        amount = float(intensity) * _EMOTION_CURRENT_SCALE
+        self._pending_bumps.append(
+            (sensor_slice, _EMOTION_BUMP_FRAMES, amount)
+        )
+
+    def snapshot(self) -> Dict[str, Any]:
+        """Lightweight telemetry snapshot — counters + health metrics.
+        Use ``save_snapshot`` for full state persistence."""
+        out = {
+            "step_index": self._step_index,
+            "n_neurons": self.config.n_neurons,
+            "mean_spike_history": [
+                sum(triple) for triple in self._spike_history
+            ],
+        }
+        if self.criticality is not None:
+            out["criticality"] = self.criticality.snapshot()
+        if self.weight_norm_watchdog is not None:
+            out["weight_norm"] = self.weight_norm_watchdog.snapshot()
+        if self.body is not None:
+            out["body"] = self.body.snapshot()
+        return out
+
+    def save_snapshot(
+        self,
+        path: Any,
+        tier: Any = None,
+        notes: str = "",
+    ) -> Any:
+        """Write a full substrate snapshot to ``path``.
+
+        Default tier: ``SnapshotTier.WARM``. Returns a SnapshotHeader.
+        Atomic write — existing file at ``path`` is only replaced on
+        successful serialization + compression.
+        """
+        from novafox.substrate.persistence import (
+            SnapshotTier,
+            save_full_snapshot,
+        )
+        if tier is None:
+            tier = SnapshotTier.WARM
+        return save_full_snapshot(self, path, tier, notes)
+
+    def load_snapshot(self, path: Any) -> Any:
+        """Restore substrate state from ``path``. Returns the header."""
+        from novafox.substrate.persistence import load_full_snapshot
+        return load_full_snapshot(path, self)
+
+    # --------------------------------------------------------------
+    # Internals.
+    # --------------------------------------------------------------
+
+    def _apply_pending_bumps(self) -> None:
+        """Write pending emotion bumps into i_ext; decrement their TTL.
+
+        Previous bumps already decayed out at the end of the last step
+        (see `_decay_ext_current`), so this is additive into a zero field.
+        """
+        xp = self.backend.xp
+        remaining: List[Tuple[slice, int, float]] = []
+        for (neuron_slice, frames_left, amount) in self._pending_bumps:
+            # Elementwise-add into the slice on-device.
+            if self.backend.name == "torch":
+                self.neurons.i_ext[neuron_slice] = (
+                    self.neurons.i_ext[neuron_slice] + amount
+                )
+            else:
+                self.neurons.i_ext[neuron_slice] = (
+                    self.neurons.i_ext[neuron_slice] + xp.asarray(
+                        amount, dtype=self.neurons.i_ext.dtype
+                    )
+                )
+            if frames_left - 1 > 0:
+                remaining.append((neuron_slice, frames_left - 1, amount))
+        self._pending_bumps = remaining
+
+    def _compute_synaptic_input(self) -> None:
+        """I_syn = W @ spiked. Dense matmul at P0.
+
+        `spiked` is int8 for storage compactness; we promote to float32
+        for the matmul. Backends handle the promotion differently:
+        torch uses `.to`, numpy/cupy use `.astype`.
+
+        Gap junctions, when enabled (mostly a Phase 1 feature tested
+        with the conductance path, but exposed on the P0 matmul path
+        too for symmetry), add their voltage-coupling current after
+        the matmul.
+        """
+        if self.backend.name == "torch":
+            spiked_f = self.neurons.spiked.to(self.synapses.weights.dtype)
+        else:
+            weight_dtype = getattr(self.synapses.weights, "dtype", np.float32)
+            spiked_f = self.neurons.spiked.astype(weight_dtype)
+        self.neurons.i_syn[...] = self.synapses.weights @ spiked_f
+        if self.gap_junctions is not None:
+            apply_gap_junction_currents(
+                self.gap_junctions, self.neurons.v, self.neurons.i_syn,
+                self.backend,
+            )
+
+    def _compute_synaptic_input_delayed(self) -> None:
+        """P1-1 path: drain the current ring slot into `i_syn`.
+
+        Called before neuron integration. The delay ring already
+        contains weighted current deposits from earlier spikes whose
+        delays targeted this sub-step. After the drain the slot is
+        zeroed so it's clean for the next wrap-around.
+
+        Gap junctions, when enabled, add their voltage-coupling
+        current on top of the drained synaptic current.
+        """
+        drain_current_step(
+            self._delay_ring,
+            self._delay_read_head,
+            self.neurons.i_syn,
+            self.backend,
+        )
+        if self.gap_junctions is not None:
+            apply_gap_junction_currents(
+                self.gap_junctions, self.neurons.v, self.neurons.i_syn,
+                self.backend,
+            )
+
+    def _deliver_spikes_to_ring(self) -> None:
+        """Schedule weighted current into the ring(s) at each edge's
+        delay slot. Called after integration so spikes emitted now are
+        delivered to downstream neurons in future sub-steps.
+
+        Three code paths:
+        * P1-4 (conductance + vesicles): stochastic release, decrements
+          available-vesicle count per successful synapse.
+        * P1-2 (conductance): deterministic two-lane delivery.
+        * P1-1 (signed ring): single ring, signed weight deposited.
+        """
+        if (
+            self.config.use_conductance_synapses
+            and self.config.vesicle_kinetics
+            and self.synapses.has_vesicle_kinetics
+        ):
+            # Seed the per-call RNG deterministically from the step
+            # counter so runs with the same config replay identically.
+            rng_seed = (int(self.config.seed) * 1_000_003) + self._step_index
+            deliver_spikes_with_vesicles(
+                indptr=self.synapses.indptr,
+                indices=self.synapses.indices,
+                weights_csr=self.synapses.weights_csr,
+                delays=self.synapses.delays,
+                edge_kind=self.synapses.edge_kind,
+                vesicle_pool=self.synapses.vesicle_pool_size,
+                vesicle_avail=self.synapses.vesicle_available,
+                p_release=self.synapses.vesicle_p_release,
+                spiked=self.neurons.spiked,
+                ring_e=self._delay_ring_e,
+                ring_i=self._delay_ring_i,
+                write_head=self._delay_write_head,
+                max_delay=self._max_delay_steps,
+                backend=self.backend,
+                seed=rng_seed,
+            )
+        elif self.config.use_conductance_synapses:
+            deliver_spikes_conductance(
+                indptr=self.synapses.indptr,
+                indices=self.synapses.indices,
+                weights_csr=self.synapses.weights_csr,
+                delays=self.synapses.delays,
+                edge_kind=self.synapses.edge_kind,
+                spiked=self.neurons.spiked,
+                ring_e=self._delay_ring_e,
+                ring_i=self._delay_ring_i,
+                write_head=self._delay_write_head,
+                max_delay=self._max_delay_steps,
+                backend=self.backend,
+            )
+        else:
+            deliver_spikes(
+                indptr=self.synapses.indptr,
+                indices=self.synapses.indices,
+                weights_csr=self.synapses.weights_csr,
+                delays=self.synapses.delays,
+                spiked=self.neurons.spiked,
+                ring=self._delay_ring,
+                write_head=self._delay_write_head,
+                max_delay=self._max_delay_steps,
+                backend=self.backend,
+            )
+
+    def _compute_synaptic_input_conductance(self, dt_ms: float) -> None:
+        """P1-2 path: drain E/I rings into the h kick buffers, step
+        dual-exp kinetics on both lanes, then compute voltage-dependent
+        I_syn = g_E * (E_rev_E - V) + g_I * (E_rev_I - V).
+        """
+        # Drain: add the current read-head slot into h_e / h_i.
+        drain_kicks_into_conductance(
+            self._delay_ring_e,
+            self._delay_read_head,
+            self.neurons.h_e,
+            self.backend,
+        )
+        drain_kicks_into_conductance(
+            self._delay_ring_i,
+            self._delay_read_head,
+            self.neurons.h_i,
+            self.backend,
+        )
+        # Advance dual-exp kinetics on each lane.
+        step_conductance(
+            h=self.neurons.h_e,
+            g=self.neurons.g_e,
+            dt_ms=dt_ms,
+            tau_r_ms=self.conductance_params.tau_r_e,
+            tau_d_ms=self.conductance_params.tau_d_e,
+            backend=self.backend,
+        )
+        step_conductance(
+            h=self.neurons.h_i,
+            g=self.neurons.g_i,
+            dt_ms=dt_ms,
+            tau_r_ms=self.conductance_params.tau_r_i,
+            tau_d_ms=self.conductance_params.tau_d_i,
+            backend=self.backend,
+        )
+        # Compute voltage-dependent synaptic current.
+        compute_conductance_current(
+            v=self.neurons.v,
+            g_e=self.neurons.g_e,
+            g_i=self.neurons.g_i,
+            params=self.conductance_params,
+            out=self.neurons.i_syn,
+            backend=self.backend,
+        )
+        # P1-5: add electrical gap-junction currents on top of chemical
+        # synaptic current. No-op when gap junctions aren't enabled.
+        if self.gap_junctions is not None:
+            apply_gap_junction_currents(
+                self.gap_junctions, self.neurons.v, self.neurons.i_syn,
+                self.backend,
+            )
+
+    def _decay_ext_current(self) -> None:
+        """External-current dynamics: decays to zero every frame. Bumps
+        active for multiple frames are re-applied via `_pending_bumps`."""
+        xp = self.backend.xp
+        if self.backend.name == "torch":
+            self.neurons.i_ext.zero_()
+        else:
+            self.neurons.i_ext[...] = xp.zeros_like(self.neurons.i_ext)
+
+    def _push_spike_history(self) -> None:
+        """Legacy single-sub-step sampling. Kept for external callers
+        and for the P0 code path where substep_count=1 (in which
+        case this is identical to the per-frame aggregate)."""
+        spiked_host = self.backend.to_host(self.neurons.spiked)
+        counts = tuple(
+            int(spiked_host[sl].sum()) for sl in self._pad_slices
+        )
+        self._spike_history.append(counts)
+
+    def _push_spike_history_frame(self, frame_subpop_counts: List[int]) -> None:
+        """Push an accumulated per-frame count to the history ring.
+
+        Called by ``step()`` with counts summed across all sub-steps.
+        This is what the PAD readout reads, so spike-count accounting
+        must survive sub-stepping without undercounting.
+        """
+        self._spike_history.append(
+            (frame_subpop_counts[0], frame_subpop_counts[1], frame_subpop_counts[2])
+        )
+
+    def _compute_pad_readout(self) -> Tuple[float, float, float]:
+        """Average spike count → firing rate → tanh compression → PAD.
+
+        Each PAD axis is `tanh((rate_hz - reference) / scale)` which is
+        roughly 0 at reference-firing rates and saturates near ±1.
+        """
+        if not self._spike_history:
+            return (0.0, 0.0, 0.0)
+
+        sums = [0, 0, 0]
+        for triple in self._spike_history:
+            for i, c in enumerate(triple):
+                sums[i] += c
+        frames = len(self._spike_history)
+        dt_s = self.config.dt_ms / 1000.0
+        pop_sizes = [max(1, sl.stop - sl.start) for sl in self._pad_slices]
+
+        pad: List[float] = []
+        for i in range(3):
+            rate_hz = sums[i] / (pop_sizes[i] * frames * dt_s)
+            axis = math.tanh(
+                (rate_hz - _PAD_RATE_REFERENCE_HZ) / _PAD_RATE_SCALE_HZ
+            )
+            pad.append(float(axis))
+        return (pad[0], pad[1], pad[2])
+
+    def _nearest_emotion_prototype(
+        self, pad: Tuple[float, float, float]
+    ) -> Optional[Tuple[str, float]]:
+        """Nearest-prototype classifier over the 16 fixed emotion PAD
+        coordinates. Returns `(label, 1 - normalized_distance)` or None
+        when PAD is essentially neutral.
+
+        Imports from `novafox.emotional.emotions` are deferred so the
+        substrate package has no hard dependency on v1 code at import
+        time — the emotions module works either way but this keeps the
+        import graph clean.
+        """
+        # Neutral guard: near-zero magnitude → no dominant emotion.
+        mag = math.sqrt(pad[0] ** 2 + pad[1] ** 2 + pad[2] ** 2)
+        if mag < 0.05:
+            return None
+
+        try:
+            from novafox.emotional.emotions import EMOTION_TO_PAD_MAP
+        except Exception:  # noqa: BLE001 — keep package self-contained
+            return None
+
+        best_label: Optional[str] = None
+        best_dist = float("inf")
+        for emo, proto in EMOTION_TO_PAD_MAP.items():
+            d = math.sqrt(
+                (pad[0] - proto.pleasure) ** 2
+                + (pad[1] - proto.arousal) ** 2
+                + (pad[2] - proto.dominance) ** 2
+            )
+            if d < best_dist:
+                best_dist = d
+                best_label = str(emo.value)
+
+        # 1 - d / max_pad_distance(=sqrt(12)) as a confidence proxy.
+        confidence = max(0.0, 1.0 - best_dist / math.sqrt(12.0))
+        if best_label is None:
+            return None
+        return (best_label, float(confidence))
+
+    def _emotion_sensor_slice(self, emotion_type: str) -> slice:
+        """Deterministic mapping: emotion name → contiguous neuron slice.
+
+        Uses sha256 rather than Python's built-in hash to avoid PYTHONHASHSEED
+        randomization affecting reproducibility. Each emotion gets a
+        window of ~20 neurons (or fewer when N is tiny).
+        """
+        window = max(1, min(20, self.config.n_neurons // 32))
+        digest = hashlib.sha256(emotion_type.encode("utf-8")).digest()
+        anchor = int.from_bytes(digest[:4], "big") % max(
+            1, self.config.n_neurons - window
+        )
+        return slice(anchor, anchor + window)

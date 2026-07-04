@@ -1,0 +1,15 @@
+{
+  "name": "koroki-ascension-2.0",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Koroki AI companion monorepo (Discord-first, Desktop-second)",
+  "workspaces": [
+    "clients/discord-bot",
+    "clients/web"
+  ],
+  "scripts": {
+    "bot:start": "npm --workspace clients/discord-bot start",
+    "bot:dev": "npm --workspace clients/discord-bot run dev",
+    "web:start": "npm --workspace clients/web start"
+  }
+}

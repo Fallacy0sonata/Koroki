@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Koroki — Bedroom Scene</title>
+<style>
+  html,body{margin:0;height:100%;background:#07060a;overflow:hidden;font-family:system-ui,sans-serif}
+  #stage{position:fixed;inset:0}
+  .ui{position:fixed;left:14px;bottom:14px;display:flex;gap:18px;z-index:10;
+      background:rgba(20,16,24,.62);backdrop-filter:blur(6px);padding:10px 14px;border-radius:12px;
+      border:1px solid rgba(200,160,200,.18)}
+  .grp{display:flex;flex-direction:column;gap:6px}
+  .grp h4{margin:0 0 2px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#caa9c8;font-weight:600}
+  .row{display:flex;gap:6px;flex-wrap:wrap}
+  button{cursor:pointer;border:1px solid rgba(210,170,210,.25);background:rgba(40,30,44,.8);color:#eee;
+         padding:6px 11px;border-radius:8px;font-size:13px;transition:.12s}
+  button:hover{background:rgba(120,40,90,.7);border-color:rgba(230,120,180,.5)}
+  button.active{background:rgba(150,40,90,.85);border-color:rgba(240,140,190,.8);color:#fff}
+  #status{position:fixed;top:12px;left:14px;color:#8a7a8a;font-size:12px;z-index:10}
+</style>
+</head>
+<body>
+  <div id="stage"></div>
+  <div id="status"></div>
+  <div class="ui">
+    <div class="grp"><h4>Spot</h4><div class="row" id="spotRow"></div></div>
+    <div class="grp"><h4>Expression</h4><div class="row" id="exprRow"></div></div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
+  <script src="./scene.js?v=1" type="module"></script>
+</body>
+</html>
