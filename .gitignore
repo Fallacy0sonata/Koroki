@@ -16,6 +16,7 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+graphify-out/
 
 # ── Local tools & model stores (not Koroki source) ───────
 tools/ComfyUI/
