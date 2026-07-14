@@ -7,16 +7,16 @@ than a maximal plugin stack: each layer must own a distinct job and earn its mai
 
 | Need | Source of truth | Adopt now | Candidate later |
 |---|---|---|---|
-| Owner intent and agent rules | `AGENTS.md` + private `CLAUDE.md` | Repository files | Repo-local Koroki skill |
-| Current work | Private `docs/master_queue.md` | Keep until Git baseline is clean | Backlog.md or GitHub Issues |
+| Owner intent and agent rules | `AGENTS.md` + private `CLAUDE.md` | Repository files + repo-local Koroki skill | Refine after real task failures |
+| Current work | Private `docs/master_queue.md` | Keep | GitHub Issues after owner authentication |
 | Historical decisions | Private `LEGACY.md` | Keep | Search/index only; never duplicate it |
-| Code understanding | Code, tests, `rg` | Built-in tools | Serena MCP trial |
+| Code understanding | Code, tests, `rg` | Serena MCP for Python/TypeScript | Remove if three real tasks show no benefit |
 | Library documentation | Official primary docs | Web/docs lookup | Context7 only if lookup friction proves real |
-| Dependencies | `pyproject.toml`, package locks | Existing files | `uv` lock/sync migration |
-| Data/model lineage | Current Drive vault + manifests | Existing verified backup | DVC pilot on one dataset/model family |
-| Remote collaboration | Local Git | Clean private baseline first | GitHub MCP, read-only and minimal toolsets |
-| Quality gate | `scripts/check_all.py` | Yes | Ruff + secret scan + GitHub Actions |
-| Large feature design | Focused design note | As needed | Spec Kit only for ambiguous multi-system arcs |
+| Dependencies | `pyproject.toml`, package locks | `uv` + Ruff installed | Controlled `uv` lock/sync migration |
+| Data/model lineage | Current Drive vault + manifests | DVC initialized; local Drive remote configured | Select one artifact after disk cleanup |
+| Remote collaboration | Local Git | Private baseline committed; GitHub MCP configured read-only | Owner GitHub login, private push, minimal CI |
+| Quality gate | `scripts/check_all.py` | Tests + staged Gitleaks scan | Minimal GitHub Actions after private push |
+| Large feature design | Focused design note | Spec Kit installed, use only when justified | Pod/creator arc pilot |
 
 ## Admission rule for tools
 
@@ -53,21 +53,38 @@ allow-list into a separate repository or build directory. Public artifacts may i
 architecture, generalized safety patterns, test/evaluation harnesses, and demonstrations; they do
 not include memory, identity corpus, exact adapters, credentials, private docs, or raw datasets.
 
-## Creator-income path
+## Creator-income stack
 
-The first realistic income loop is not unattended AI spam. It is an approval-gated creator system:
+Koroki should not be forced to earn only by becoming a content mill. The strongest portfolio is a
+stack in which public content is distribution, not the sole product:
 
-1. Koroki plays/lives normally and OBS records an authenticated local session.
-2. Events and telemetry mark candidate moments while the owner retains the original footage.
-3. A local pipeline cuts clips, captions them, proposes titles/descriptions/thumbnails, and packages
-   provenance plus disclosure metadata.
-4. The owner approves; the uploader sends private/unlisted drafts first.
-5. Performance data informs future selection without changing Koroki's character or gameplay goals.
+1. **Sanitized developer products:** package one narrow, general tool learned from Koroki, such as
+   a private AI-workspace safety kit, local-agent recovery/evaluation harness, or approval-gated
+   creator workflow. Never ship Koroki's identity, memory, voice/model weights, live integration,
+   private history, or exact production configuration.
+2. **Licensed software:** if a small product proves useful, sell a maintained desktop utility or
+   subscription with license keys. This is semi-passive, because support and updates remain real
+   work, but it can sell without Koroki continuously performing.
+3. **Membership and one-time releases:** devlogs, art/lore packs, experiments, and polished builds
+   can become recurring or one-time fan products after a small audience exists. Minecraft footage
+   itself remains freely viewable where the current Usage Guidelines require it.
+4. **Productized setup or licensing:** a fixed-scope installation/reliability audit for another
+   creator or game-agent project is the quickest plausible cash route, but it is active service
+   revenue rather than passive income. Use it to discover which repeated work deserves a product.
+5. **A distinct interactive experience:** the stage/world/avatar work can eventually become a
+   small original game or companion experience that does not rely on Minecraft assets or branding.
+6. **Sanitized open-source sponsorship:** publish only a genuinely reusable, identity-free subset;
+   GitHub Sponsors becomes relevant after people actually depend on it, not before.
 
-This preserves original authorship and keeps automation in production assistance, where platform
-policies are much friendlier than repetitive mass-generated uploads. Memberships and occasional
-digital products can follow once an audience exists; they are downstream of consistent authentic
-content, not a substitute for it.
+Minecraft server monetization is possible under specific current rules, but it adds payment
+history, pricing disclosure, privacy, fairness, and all-ages obligations. Selling Koroki as an
+exclusive advantage inside a server is therefore not the recommended first product. Mass AI
+uploads, paid emotional dependency, raw persona/voice/model sales, crypto/NFT mechanics, and
+unattended account automation are outside the plan.
+
+Content can still be an approval-gated acquisition loop: record authentic sessions, mark candidate
+moments, cut and caption locally, keep provenance/disclosure metadata, and require owner approval
+before private/unlisted drafts or publication.
 
 ## Sources used for the shortlist
 
@@ -81,6 +98,11 @@ content, not a substitute for it.
 - uv: <https://docs.astral.sh/uv/>
 - Ruff: <https://docs.astral.sh/ruff/>
 - DVC Google Drive remote: <https://dvc.org/doc/user-guide/data-management/remote-storage/google-drive>
+- Lemon Squeezy digital products and licensing: <https://docs.lemonsqueezy.com/help/products>
+- Patreon one-time purchases: <https://support.patreon.com/hc/en-us/articles/16303719836813-Selling-one-time-purchases-on-Patreon>
+- itch.io creator payments: <https://itch.io/docs/creators/payments>
+- GitHub Sponsors: <https://docs.github.com/en/sponsors/getting-started-with-github-sponsors/about-github-sponsors>
+- Minecraft Usage Guidelines: <https://www.minecraft.net/en-us/usage-guidelines>
 - OBS WebSocket: <https://github.com/obsproject/obs-websocket>
 - YouTube channel monetization policies: <https://support.google.com/youtube/answer/1311392>
 - YouTube Data API uploads: <https://developers.google.com/youtube/v3/guides/uploading_a_video>
