@@ -1,0 +1,4 @@
+interface:
+  display_name: "Koroki Workspace"
+  short_description: "Develop Koroki safely across her live systems"
+  default_prompt: "Use $koroki-workspace to inspect, change, and verify Koroki without disturbing live services or private data."

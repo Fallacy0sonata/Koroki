@@ -29,6 +29,7 @@ import collections
 import io
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import random
 import time
@@ -56,7 +57,12 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(str(_log_dir / "discord.log"), encoding="utf-8"),
+        RotatingFileHandler(
+            str(_log_dir / "discord.log"),
+            maxBytes=25 * 1024 * 1024,
+            backupCount=4,
+            encoding="utf-8",
+        ),
     ],
 )
 logger = logging.getLogger("koroki.discord")
@@ -141,6 +147,22 @@ REGAL_COLOR = discord.Color.from_rgb(193, 154, 107)
 # Test-only guild — commands registered here never appear in production servers.
 TEST_GUILD_ID = 1503131422553018408
 _TEST_GUILD = discord.Object(id=TEST_GUILD_ID)
+
+# Where she may talk (owner reopened the community 2026-07-08 — v3 validated,
+# sleep gate + guillotine live). guild_id -> channel allowlist; None = every
+# channel in that guild. Guilds absent here are ignored entirely. The
+# mentions-only rule and owner gates still apply on top.
+ALLOWED_GUILD_CHANNELS: dict[int, set[int] | None] = {
+    TEST_GUILD_ID: None,                          # her home — all channels
+    1453744803715092673: {1473935292837925061},   # community server — "Community AI" only
+    1257681851296911360: None,                    # opened 2026-07-08 — all channels
+}
+
+# Both PRIVATE guilds get the full test-tool command set (owner 2026-07-08:
+# 125… is his second private server — only him + picked people; the test guild
+# has testers). All tools stay owner-gated at runtime regardless. Public
+# servers (the community guild) get global commands only — never these.
+_PRIVATE_GUILDS = [_TEST_GUILD, discord.Object(id=1257681851296911360)]
 
 # Channel inside the test guild where testers interact with Koroki.
 # Every message here + full bot evaluation data is written to a JSONL file
@@ -309,8 +331,7 @@ def _relationship_tier(score: int) -> str:
 
 @bot.tree.command(name="ping", description="Check bot latency")
 async def ping_slash(interaction: discord.Interaction):
-    if not await _ensure_owner_interaction(interaction):
-        return
+    # everyone: harmless liveness check (owner ruling 2026-07-11)
     await interaction.response.send_message(
         f"Pong! Latency: {bot.latency * 1000:.0f}ms",
         ephemeral=True,
@@ -318,6 +339,7 @@ async def ping_slash(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="status", description="Check Orchestrator health")
+@app_commands.default_permissions(administrator=True)  # hide from non-admins
 async def status_slash(interaction: discord.Interaction):
     if not await _ensure_owner_interaction(interaction):
         return
@@ -352,6 +374,7 @@ async def relationship_slash(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="relationship_check", description="Owner: inspect any user's relationship state")
+@app_commands.default_permissions(administrator=True)  # hide from non-admins
 @app_commands.describe(target="User to inspect")
 async def relationship_check_slash(interaction: discord.Interaction, target: discord.User):
     if not await _ensure_owner_interaction(interaction):
@@ -371,6 +394,7 @@ async def relationship_check_slash(interaction: discord.Interaction, target: dis
 
 
 @bot.tree.command(name="timeout", description="Owner: toggle Koroki message timeout")
+@app_commands.default_permissions(administrator=True)  # hide from non-admins
 @app_commands.describe(action="on/off/status")
 @app_commands.choices(
     action=[
@@ -397,6 +421,7 @@ async def timeout_slash(interaction: discord.Interaction, action: app_commands.C
 
 
 @bot.tree.command(name="reset_memory", description="Owner: clear memory state for one user or everyone")
+@app_commands.default_permissions(administrator=True)  # hide from non-admins
 @app_commands.describe(target="Target user (omit when everyone=true)", everyone="Clear all users")
 async def reset_memory_slash(
     interaction: discord.Interaction,
@@ -439,6 +464,7 @@ async def reset_memory_slash(
 
 
 @bot.tree.command(name="reset_relationship", description="Owner: reset relationship score for one user or everyone")
+@app_commands.default_permissions(administrator=True)  # hide from non-admins
 @app_commands.describe(target="Target user (omit when everyone=true)", everyone="Reset all non-owner users")
 async def reset_relationship_slash(
     interaction: discord.Interaction,
@@ -481,6 +507,7 @@ async def reset_relationship_slash(
 
 
 @bot.tree.command(name="mention", description="Owner: make Koroki greet/mention someone")
+@app_commands.default_permissions(administrator=True)  # hide from non-admins
 @app_commands.describe(target="User or bot to mention", greeting="Optional custom context for greeting")
 async def mention_slash(interaction: discord.Interaction, target: discord.Member, greeting: str = ""):
     if not await _ensure_owner_interaction(interaction):
@@ -538,6 +565,73 @@ async def help_slash(interaction: discord.Interaction):
 # ────────────────────────────────────────────────────────────────────
 # Singing Slash Command
 # ────────────────────────────────────────────────────────────────────
+
+# /sing daily rate limits (owner ruling 2026-07-11): everyone gets N/day, a
+# subscriber Discord role gets more, owner is unlimited. Counted per UTC day;
+# usage recorded at accept-time (a rare pipeline failure costs a slot — owner
+# can /reset if needed). Config: settings.yaml singing.rate_limits.
+SING_USAGE_FILE = BASE_DIR / "data" / "discord" / "sing_usage.json"
+
+
+def _sing_limits() -> dict:
+    from shared.utils.config import get_settings
+
+    rl = (get_settings().get("singing") or {}).get("rate_limits") or {}
+    return {
+        "everyone": int(rl.get("everyone_per_day", 5)),
+        "subscriber": int(rl.get("subscriber_per_day", 25)),
+        "role": str(rl.get("subscriber_role", "Koroki+")),
+    }
+
+
+def _sing_usage_today() -> tuple[str, dict]:
+    """(utc_day_key, {user_id: count}) — only today's bucket is retained."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        data = json.loads(SING_USAGE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    return today, dict(data.get(today) or {})
+
+
+def _sing_record_use(user_id: str) -> None:
+    today, bucket = _sing_usage_today()
+    bucket[user_id] = int(bucket.get(user_id, 0)) + 1
+    try:
+        SING_USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # write ONLY today's bucket — old days self-prune
+        SING_USAGE_FILE.write_text(json.dumps({today: bucket}), encoding="utf-8")
+    except Exception:
+        logger.warning("sing usage write failed", exc_info=True)
+
+
+def _sing_tier_limit(interaction: discord.Interaction) -> tuple[Optional[int], str]:
+    """(daily_limit or None for unlimited, tier_label)."""
+    limits = _sing_limits()
+    if _is_owner_id(interaction.user.id):
+        return None, "owner"
+    roles = getattr(interaction.user, "roles", []) or []
+    if any(getattr(r, "name", "") == limits["role"] for r in roles):
+        return limits["subscriber"], "subscriber"
+    return limits["everyone"], "everyone"
+
+
+async def _sing_rate_ok(interaction: discord.Interaction) -> bool:
+    """Enforce the daily sing cap; reject (ephemeral) + return False if over."""
+    limit, tier = _sing_tier_limit(interaction)
+    if limit is None:
+        return True  # owner: unlimited
+    _, bucket = _sing_usage_today()
+    if int(bucket.get(str(interaction.user.id), 0)) >= limit:
+        hint = ("" if tier == "subscriber"
+                else f" (subscribers get {_sing_limits()['subscriber']}/day)")
+        await interaction.response.send_message(
+            f"mm, that's all {limit} songs you get today~ come back tomorrow.{hint}",
+            ephemeral=True,
+        )
+        return False
+    return True
+
 
 def _sing_intro_text(song: str, relationship_score: int) -> str:
     if relationship_score >= 80:
@@ -612,7 +706,12 @@ async def sing_slash(
     vocal_only: bool = False,
 ):
     import base64 as _b64, tempfile, os as _os
+    # Tiered daily cap (owner unlimited / subscriber role / everyone) — checked
+    # BEFORE the first response so the rejection is the interaction's reply.
+    if not await _sing_rate_ok(interaction):
+        return
     user_id = str(interaction.user.id)
+    _sing_record_use(user_id)
     payload = _read_memory_payload(user_id)
     rel_score = int(payload.get("relationship_score", 50))
     intro = _sing_intro_text(song, rel_score)
@@ -872,26 +971,43 @@ async def chess_resign_cmd(interaction: discord.Interaction):
 # ────────────────────────────────────────────────────────────────────
 
 _minecraft_proc: asyncio.subprocess.Process | None = None
+# Supervision state (2026-07-14): the node process can die SILENTLY (native crash)
+# or wedge with a blocked event loop (pathfinder A* storm) — in both cases its own
+# JS-level guards are dead. The parent must supervise: index.js prints "[MC] hb"
+# every 45s; no output for _MC_STALL_S seconds => kill + restart. Process exit
+# (returncode set) => restart. Rate-limited so a broken server can't loop forever.
+_mc_desired: bool = False              # owner wants her in-game (join sets, leave clears)
+_mc_spawn_env: dict | None = None      # env of the last join (for restarts)
+_mc_channel: discord.abc.Messageable | None = None
+_mc_last_output: float = 0.0
+_mc_restarts: list[float] = []         # timestamps of supervisor restarts
+_mc_supervisor_task: asyncio.Task | None = None
+_MC_STALL_S = 120
+_MC_MAX_RESTARTS = 8                   # per hour, then give up loudly
 
-minecraft_group = app_commands.Group(name="minecraft", description="Koroki's Minecraft player client")
+minecraft_group = app_commands.Group(
+    name="minecraft", description="Koroki's Minecraft player client",
+    default_permissions=discord.Permissions(administrator=True),  # hide from non-admins
+)
 bot.tree.add_command(minecraft_group)
 
 MC_BOT_DIR = BASE_DIR / "clients" / "minecraft-bot"
 
 
-async def _mc_log_relay(channel: discord.abc.Messageable) -> None:
+async def _mc_log_relay(proc: asyncio.subprocess.Process, channel: discord.abc.Messageable) -> None:
     """Read stdout from the Minecraft bot and relay key lines to Discord."""
-    global _minecraft_proc
-    if not _minecraft_proc:
-        return
+    global _mc_last_output
     try:
         while True:
-            line = await _minecraft_proc.stdout.readline()
+            line = await proc.stdout.readline()
             if not line:
                 break
             text = line.decode("utf-8", errors="replace").strip()
             if not text:
                 continue
+            _mc_last_output = time.time()
+            if text == "[MC] hb":
+                continue  # liveness heartbeat — supervisor food, not chat content
             logger.info("[MC] %s", text)
             # Only surface lines that start with our own markers to avoid chat spam.
             if text.startswith("[MC]") or text.startswith("[BrainClient]"):
@@ -905,6 +1021,71 @@ async def _mc_log_relay(channel: discord.abc.Messageable) -> None:
         logger.info("[MC] Log relay ended.")
 
 
+async def _mc_start_process() -> bool:
+    """(Re)start the Minecraft bot with the saved env; wire up its log relay."""
+    global _minecraft_proc, _mc_last_output
+    if not _mc_spawn_env or not _mc_channel:
+        return False
+    try:
+        _minecraft_proc = await asyncio.create_subprocess_exec(
+            "node", "index.js",
+            cwd=str(MC_BOT_DIR),
+            env=_mc_spawn_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+    except Exception as exc:
+        logger.error("[MC] Failed to start bot: %s", exc)
+        _minecraft_proc = None
+        return False
+    _mc_last_output = time.time()
+    asyncio.create_task(_mc_log_relay(_minecraft_proc, _mc_channel), name="koroki-mc-log")
+    logger.info("[MC] Minecraft bot started (PID %d)", _minecraft_proc.pid)
+    return True
+
+
+async def _mc_supervisor() -> None:
+    """Kill-and-restart the bot when it dies silently or wedges (no output)."""
+    global _minecraft_proc, _mc_restarts
+    while True:
+        await asyncio.sleep(20)
+        if not _mc_desired or _minecraft_proc is None:
+            continue
+        died = _minecraft_proc.returncode is not None
+        stalled = (time.time() - _mc_last_output) > _MC_STALL_S
+        if not died and not stalled:
+            continue
+        # rate limit: give up (loudly) if she keeps dying — likely the server itself
+        now = time.time()
+        _mc_restarts = [t for t in _mc_restarts if now - t < 3600]
+        if len(_mc_restarts) >= _MC_MAX_RESTARTS:
+            if _mc_channel:
+                try:
+                    await _mc_channel.send(
+                        "*[MC] supervisor: too many restarts this hour — giving up. "
+                        "Use `/minecraft join` when the server is healthy.*"
+                    )
+                except Exception:
+                    pass
+            logger.error("[MC] supervisor: restart limit hit — standing down.")
+            return
+        _mc_restarts.append(now)
+        reason = "process died" if died else f"no output for {_MC_STALL_S}s (wedged)"
+        logger.warning("[MC] supervisor: %s — restarting (%d this hour)", reason, len(_mc_restarts))
+        if _mc_channel:
+            try:
+                await _mc_channel.send(f"*[MC] supervisor: {reason} — restarting her client*")
+            except Exception:
+                pass
+        if not died:
+            try:
+                _minecraft_proc.kill()
+                await asyncio.wait_for(_minecraft_proc.wait(), timeout=10)
+            except Exception:
+                pass
+        await _mc_start_process()
+
+
 @minecraft_group.command(name="join", description="Owner: make Koroki join a Minecraft server")
 @app_commands.describe(
     server="Server address — host or host:port (default port 25565)",
@@ -914,7 +1095,7 @@ async def mc_join_cmd(interaction: discord.Interaction, server: str = "localhost
     if not await _ensure_owner_interaction(interaction):
         return
 
-    global _minecraft_proc
+    global _minecraft_proc, _mc_desired, _mc_spawn_env, _mc_channel, _mc_supervisor_task, _mc_restarts
 
     if _minecraft_proc and _minecraft_proc.returncode is None:
         await interaction.response.send_message(
@@ -943,29 +1124,28 @@ async def mc_join_cmd(interaction: discord.Interaction, server: str = "localhost
     if version.strip():
         env["MC_VERSION"] = version.strip()
 
-    try:
-        _minecraft_proc = await asyncio.create_subprocess_exec(
-            "node", "index.js",
-            cwd=str(MC_BOT_DIR),
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        asyncio.create_task(_mc_log_relay(interaction.channel), name="koroki-mc-log")
-        ver_note = f" (version: {version.strip()})" if version.strip() else " (auto-detect with fallback)"
+    _mc_spawn_env = env
+    _mc_channel = interaction.channel
+    _mc_restarts = []
+    _mc_desired = True
+
+    ok = await _mc_start_process()
+    if not ok:
+        _mc_desired = False
         await interaction.followup.send(
-            f"Koroki is connecting to `{host}:{port}`{ver_note}...", ephemeral=True
+            "Failed to start the Minecraft bot (is Node.js installed and in PATH?).", ephemeral=True
         )
-        logger.info("[MC] Started Minecraft bot → %s:%s (PID %d)", host, port, _minecraft_proc.pid)
-    except FileNotFoundError:
-        await interaction.followup.send(
-            "Node.js not found. Make sure Node.js is installed and in PATH.", ephemeral=True
-        )
-        _minecraft_proc = None
-    except Exception as exc:
-        logger.error("[MC] Failed to start bot: %s", exc)
-        await interaction.followup.send(f"Failed to start Minecraft bot: {exc}", ephemeral=True)
-        _minecraft_proc = None
+        return
+
+    # one supervisor for the whole session — restarts her on silent death / wedge
+    if _mc_supervisor_task is None or _mc_supervisor_task.done():
+        _mc_supervisor_task = asyncio.create_task(_mc_supervisor(), name="koroki-mc-supervisor")
+
+    ver_note = f" (version: {version.strip()})" if version.strip() else " (auto-detect with fallback)"
+    await interaction.followup.send(
+        f"Koroki is connecting to `{host}:{port}`{ver_note}... (supervised: auto-restarts on crash/wedge)",
+        ephemeral=True,
+    )
 
 
 @minecraft_group.command(name="leave", description="Owner: disconnect Koroki from Minecraft")
@@ -973,7 +1153,9 @@ async def mc_leave_cmd(interaction: discord.Interaction):
     if not await _ensure_owner_interaction(interaction):
         return
 
-    global _minecraft_proc
+    global _minecraft_proc, _mc_desired
+
+    _mc_desired = False  # supervisor: stand down — this exit is intentional
 
     if not _minecraft_proc or _minecraft_proc.returncode is not None:
         await interaction.response.send_message("No active Minecraft session.", ephemeral=True)
@@ -1004,7 +1186,7 @@ async def mc_status_cmd(interaction: discord.Interaction):
 @bot.tree.command(
     name="test_scene",
     description="[TEST] Send a message with forced context and show full debug output",
-    guild=_TEST_GUILD,
+    guilds=_PRIVATE_GUILDS,
 )
 @app_commands.describe(
     message="Message to send to Koroki",
@@ -1144,7 +1326,7 @@ def _fmt(val) -> str:
 @bot.tree.command(
     name="test_emotion_state",
     description="[TEST] Dump stored emotion state for a user",
-    guild=_TEST_GUILD,
+    guilds=_PRIVATE_GUILDS,
 )
 @app_commands.describe(target="User to inspect (omit for yourself)")
 async def test_emotion_state_cmd(
@@ -1194,7 +1376,7 @@ async def test_emotion_state_cmd(
 @bot.tree.command(
     name="test_proactive",
     description="[TEST] Show autonomy scheduler drive metrics and proactive eligibility",
-    guild=_TEST_GUILD,
+    guilds=_PRIVATE_GUILDS,
 )
 async def test_proactive_cmd(interaction: discord.Interaction) -> None:
     if not await _ensure_owner_interaction(interaction):
@@ -1227,7 +1409,7 @@ async def test_proactive_cmd(interaction: discord.Interaction) -> None:
 @bot.tree.command(
     name="test_dpo",
     description="[TEST] Show DPO preference log stats",
-    guild=_TEST_GUILD,
+    guilds=_PRIVATE_GUILDS,
 )
 async def test_dpo_cmd(interaction: discord.Interaction) -> None:
     if not await _ensure_owner_interaction(interaction):
@@ -1329,7 +1511,7 @@ def _watch_settings() -> dict:
         return {}
 
 
-@bot.tree.command(name="vc_join", description="[STREAM] Koroki joins your voice channel", guild=_TEST_GUILD)
+@bot.tree.command(name="vc_join", description="[STREAM] Koroki joins your voice channel", guilds=_PRIVATE_GUILDS)
 async def vc_join_cmd(interaction: discord.Interaction) -> None:
     if not await _ensure_owner_interaction(interaction):
         return
@@ -1345,7 +1527,13 @@ async def vc_join_cmd(interaction: discord.Interaction) -> None:
         if existing:
             await existing.move_to(state.channel)
         else:
-            await state.channel.connect(timeout=20.0)
+            # VoiceRecvClient = VoiceClient + receive support (her ears can
+            # attach without reconnecting; playback path is unchanged).
+            try:
+                from discord.ext import voice_recv
+                await state.channel.connect(timeout=20.0, cls=voice_recv.VoiceRecvClient)
+            except ImportError:
+                await state.channel.connect(timeout=20.0)
     except Exception as exc:
         logger.error("[VC] join failed: %s", exc, exc_info=True)
         await interaction.followup.send(f"couldn't join voice: {type(exc).__name__}: {exc}", ephemeral=True)
@@ -1353,7 +1541,7 @@ async def vc_join_cmd(interaction: discord.Interaction) -> None:
     await interaction.followup.send(f"in {state.channel.name}. say the word.", ephemeral=True)
 
 
-@bot.tree.command(name="vc_leave", description="[STREAM] Koroki leaves voice", guild=_TEST_GUILD)
+@bot.tree.command(name="vc_leave", description="[STREAM] Koroki leaves voice", guilds=_PRIVATE_GUILDS)
 async def vc_leave_cmd(interaction: discord.Interaction) -> None:
     if not await _ensure_owner_interaction(interaction):
         return
@@ -1365,7 +1553,108 @@ async def vc_leave_cmd(interaction: discord.Interaction) -> None:
         await interaction.response.send_message("not in voice.", ephemeral=True)
 
 
-@bot.tree.command(name="vc_say", description="[STREAM] Stage-0 test: speak a line in the VC", guild=_TEST_GUILD)
+_ears_session = None           # ears.EarsSession | None
+_ears_text_channel: discord.abc.Messageable | None = None
+
+
+async def _on_heard_phrase(phrase) -> None:
+    """A finished spoken phrase from the VC → same pipeline as a typed message."""
+    is_owner = int(phrase.user_id) == int(OWNER_DISCORD_ID)
+    result = await query_orchestrator(
+        user_id=str(phrase.user_id),
+        message_content=phrase.text,
+        is_owner=is_owner,
+    )
+    if result is None:
+        logger.warning("[ears] orchestrator gave no reply for: %s", phrase.text[:60])
+        return
+    reply = (result.get("text") or "").strip()
+    if not reply or reply == "[silent]":
+        return
+
+    # Voice first — this is a conversation, not a chat log.
+    tts_request = result.get("tts_request")
+    if result.get("tts_deferred") and tts_request:
+        wav = await _run_deferred_tts_job(tts_request)
+        if wav:
+            await _vc_play(wav)
+
+    # Text trace so the exchange is reviewable after the session.
+    if _ears_text_channel is not None:
+        try:
+            await _ears_text_channel.send(
+                f"> 🎙 {phrase.display_name}: {phrase.text[:300]}\n{reply[:1500]}"
+            )
+        except Exception as exc:
+            logger.warning("[ears] transcript post failed: %s", exc)
+
+
+@bot.tree.command(name="ears_start", description="[STREAM] Koroki starts listening in the VC", guilds=_PRIVATE_GUILDS)
+async def ears_start_cmd(interaction: discord.Interaction) -> None:
+    global _ears_session, _ears_text_channel
+    if not await _ensure_owner_interaction(interaction):
+        return
+    vc = await _get_vc()
+    if vc is None:
+        await interaction.response.send_message("use /vc_join first", ephemeral=True)
+        return
+    if not hasattr(vc, "listen"):
+        await interaction.response.send_message(
+            "this voice connection predates her ears — /vc_leave then /vc_join again",
+            ephemeral=True,
+        )
+        return
+    if _ears_session is not None:
+        await interaction.response.send_message("already listening.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+
+    from ears import EarsSession
+    from shared.utils.config import get_settings
+
+    cfg = dict(get_settings().get("ears") or {})
+    session = EarsSession(
+        loop=bot.loop,
+        on_phrase=_on_heard_phrase,
+        owner_id=int(OWNER_DISCORD_ID),
+        listen_all=bool(cfg.get("listen_all", False)),
+        stt_model=str(cfg.get("stt_model", "base")),
+        language=str(cfg.get("language", "") or ""),
+        phrase_gap_ms=int(cfg.get("phrase_gap_ms", 700)),
+        min_phrase_ms=int(cfg.get("min_phrase_ms", 350)),
+        max_phrase_s=float(cfg.get("max_phrase_s", 30)),
+        tone_dims_enabled=bool(cfg.get("tone_dims_enabled", False)),
+        tone_model_dir=str(cfg.get("tone_model_dir", "tools/models/ser_dim_onnx")),
+    )
+    # Load whisper before attaching the sink so the first phrase isn't slow.
+    await asyncio.to_thread(session.warm)
+    session.start()
+    vc.listen(session.sink)
+    _ears_session = session
+    _ears_text_channel = interaction.channel
+    await interaction.followup.send("listening. talk to me.", ephemeral=True)
+
+
+@bot.tree.command(name="ears_stop", description="[STREAM] Koroki stops listening", guilds=_PRIVATE_GUILDS)
+async def ears_stop_cmd(interaction: discord.Interaction) -> None:
+    global _ears_session, _ears_text_channel
+    if not await _ensure_owner_interaction(interaction):
+        return
+    vc = await _get_vc()
+    if vc is not None and hasattr(vc, "stop_listening"):
+        try:
+            vc.stop_listening()
+        except Exception as exc:
+            logger.warning("[ears] stop_listening failed: %s", exc)
+    heard = _ears_session.phrases_heard if _ears_session else 0
+    if _ears_session is not None:
+        _ears_session.close()
+        _ears_session = None
+    _ears_text_channel = None
+    await interaction.response.send_message(f"ears off. ({heard} phrases heard)", ephemeral=True)
+
+
+@bot.tree.command(name="vc_say", description="[STREAM] Stage-0 test: speak a line in the VC", guilds=_PRIVATE_GUILDS)
 @app_commands.describe(text="What she should say")
 async def vc_say_cmd(interaction: discord.Interaction, text: str) -> None:
     if not await _ensure_owner_interaction(interaction):
@@ -1392,6 +1681,44 @@ _watch_streamer: str | None = None
 _watch_recent_lines: collections.deque = collections.deque(maxlen=3)
 
 
+def _streamer_profile(name: str | None) -> dict:
+    """Pronouns + display name for whoever she's co-watching (GM2 step 1).
+
+    Live 2026-07-08: watch keyed to the owner said "he" — owner_profile
+    (she/her) never reached the prompt. Owner aliases resolve to
+    models.brain.owner_profile; named friends come from streaming.watch.profiles;
+    strangers get they/them.
+    """
+    prof = {"name": name or "the streamer", "subj": "they", "obj": "them", "poss": "their"}
+    if not name:
+        return prof
+    try:
+        from shared.utils.config import get_settings
+        s = get_settings()
+        watch_cfg = (s.get("streaming") or {}).get("watch") or {}
+        key = name.strip().lower()
+        owner_aliases = [str(a).lower() for a in watch_cfg.get("owner_aliases") or []]
+        if key in owner_aliases:
+            op = (s.get("models") or {}).get("brain", {}).get("owner_profile") or {}
+            return {
+                "name": op.get("display_name", name),
+                "subj": op.get("subject_pronoun", "they"),
+                "obj": op.get("object_pronoun", "them"),
+                "poss": op.get("possessive_pronoun", "their"),
+            }
+        entry = ((watch_cfg.get("profiles") or {}).get(key)) or {}
+        pronouns = str(entry.get("pronouns", "")).lower()
+        table = {
+            "he/him": ("he", "him", "his"),
+            "she/her": ("she", "her", "her"),
+            "they/them": ("they", "them", "their"),
+        }
+        subj, obj, poss = table.get(pronouns, ("they", "them", "their"))
+        return {"name": entry.get("display_name", name), "subj": subj, "obj": obj, "poss": poss}
+    except Exception:
+        return prof
+
+
 async def _on_watch_event(summary: str, reason: str) -> None:
     """Her mouth for the watch loop: event → one addressed line (or silence) → VC.
 
@@ -1403,6 +1730,17 @@ async def _on_watch_event(summary: str, reason: str) -> None:
     """
     game_label = f"'{_watch_game}'" if _watch_game else "the stream"
     scene = summary[:600]
+    # Game card (GM2 step 2): what this game IS rides the bracket, so she never
+    # narrates AFK aura-rolling as combat again (Sol's RNG, 2026-07-08).
+    _card = ""
+    if _watch_game:
+        try:
+            import game_knowledge
+            _card_text = game_knowledge.prompt_summary(_watch_game, limit=380)
+            if _card_text:
+                _card = f" the game: {_card_text}"
+        except Exception:
+            pass
     # S1 rolling state: what's happened so far this session (bounded, overwritten).
     _memory = ""
     if _watch_session is not None:
@@ -1415,14 +1753,16 @@ async def _on_watch_event(summary: str, reason: str) -> None:
     # 2026-07-03). So commentary = answering the room, which is also exactly the
     # owner's addressed-speech pillar.
     if _watch_streamer:
+        p = _streamer_profile(_watch_streamer)
         message = (
-            f"[you're in the voice channel co-watching {_watch_streamer}'s live stream "
-            f"of {game_label}.{_memory} on their stream right now: {scene}] "
-            "someone in the vc asks: what's he even doing right now?"
+            f"[you're in the voice channel co-watching {p['name']}'s live stream "
+            f"of {game_label}. {p['name']} goes by {p['subj']}/{p['obj']}.{_card}{_memory} "
+            f"on {p['poss']} stream right now: {scene}] "
+            f"someone in the vc asks: what's {p['subj']} even doing right now?"
         )
     else:
         message = (
-            f"[you're live-streaming {game_label} to your viewers.{_memory} "
+            f"[you're live-streaming {game_label} to your viewers.{_card}{_memory} "
             f"on your stream right now: {scene}] "
             "a viewer asks: what's happening rn?"
         )
@@ -1463,7 +1803,7 @@ async def _on_watch_event(summary: str, reason: str) -> None:
         await _vc_play(result["audio_path"])
 
 
-@bot.tree.command(name="watch_windows", description="[STREAM] List visible window titles (find the stream popout)", guild=_TEST_GUILD)
+@bot.tree.command(name="watch_windows", description="[STREAM] List visible window titles (find the stream popout)", guilds=_PRIVATE_GUILDS)
 async def watch_windows_cmd(interaction: discord.Interaction) -> None:
     if not await _ensure_owner_interaction(interaction):
         return
@@ -1482,7 +1822,7 @@ async def watch_windows_cmd(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(f"visible windows:\n{listing}"[:1900], ephemeral=True)
 
 
-@bot.tree.command(name="watch_start", description="[STREAM] Stage-1: she watches a window and commentates", guild=_TEST_GUILD)
+@bot.tree.command(name="watch_start", description="[STREAM] Stage-1: she watches a window and commentates", guilds=_PRIVATE_GUILDS)
 @app_commands.describe(
     window="Part of the window title to watch (use /watch_windows to find it)",
     game="Game name (conditions her vision)",
@@ -1528,6 +1868,16 @@ async def watch_start_cmd(
     except Exception:
         vision_url = "http://127.0.0.1:9005"
 
+    # Game registry (GM2 step 2): "sol" → "Sol's RNG" — her save file resolves
+    # from any alias; unknown names keep the owner's wording.
+    if game:
+        try:
+            import game_knowledge
+            _hit_card = game_knowledge.resolve(game)
+            if _hit_card:
+                game = _hit_card["display"]
+        except Exception:
+            pass
     _watch_game = game
     _watch_streamer = streamer
     # ALWAYS enter a vision game-session while watching — without it the vision
@@ -1548,6 +1898,7 @@ async def watch_start_cmd(
         novelty_threshold=float(wcfg.get("novelty_threshold", 0.5)),
         max_describe_tokens=int(wcfg.get("max_describe_tokens", 80)),
         vision_url=vision_url,
+        idle_after_seconds=float(wcfg.get("idle_after_seconds", 45.0)),
     )
     _watch_text_channel = interaction.channel
     _watch_session = stream_watch.WatchSession(cfg, _on_watch_event)
@@ -1559,7 +1910,7 @@ async def watch_start_cmd(
     await interaction.followup.send(note, ephemeral=True)
 
 
-@bot.tree.command(name="hands_test", description="[HANDS] Dry-run: where would she click? (annotated screenshot)", guild=_TEST_GUILD)
+@bot.tree.command(name="hands_test", description="[HANDS] Dry-run: where would she click? (annotated screenshot)", guilds=_PRIVATE_GUILDS)
 @app_commands.describe(window="Part of the game window title", target="What she should point at, e.g. 'the play button'")
 async def hands_test_cmd(interaction: discord.Interaction, window: str, target: str) -> None:
     if not await _ensure_owner_interaction(interaction):
@@ -1621,6 +1972,9 @@ _play_session = None  # game_agent.PlaySession | None
 _play_text_channel: discord.abc.Messageable | None = None
 
 
+_play_voice = False  # set by /play_start voice param; off = text-only SAY (smarts tests)
+
+
 async def _on_play_say(text: str) -> None:
     """Her voice during play: post + VC, with the same repeat suppression as watch."""
     text = text.strip()[:400]
@@ -1634,7 +1988,7 @@ async def _on_play_say(text: str) -> None:
             await _play_text_channel.send(text[:1900])
         except Exception:
             pass
-    if await _get_vc() is not None:
+    if _play_voice and await _get_vc() is not None:
         tts_request = {
             "request_id": f"play_{int(time.time() * 1000)}",
             "text": text,
@@ -1647,7 +2001,7 @@ async def _on_play_say(text: str) -> None:
             await _vc_play(wav)
 
 
-@bot.tree.command(name="play_start", description="[PLAY] Stage-2: she plays the game (dry-run unless live=True)", guild=_TEST_GUILD)
+@bot.tree.command(name="play_start", description="[PLAY] Stage-2: she plays the game (dry-run unless live=True)", guilds=_PRIVATE_GUILDS)
 @app_commands.describe(
     window="Part of the game window title",
     game="Game name",
@@ -1658,8 +2012,10 @@ async def play_start_cmd(
     interaction: discord.Interaction,
     window: str,
     game: str,
-    objective: str = "explore, have fun, react to what happens",
+    objective: str = "",
+    genre: str = "sandbox",
     live: bool = False,
+    voice: bool = False,
 ) -> None:
     global _play_session, _play_text_channel
     if not await _ensure_owner_interaction(interaction):
@@ -1689,10 +2045,13 @@ async def play_start_cmd(
     except Exception as exc:
         logger.warning("[Play] game/enter failed (continuing): %s", exc)
 
+    global _play_voice
+    _play_voice = voice  # default OFF for smarts tests: text SAY only, no TTS VRAM/latency
     cfg = game_agent.PlayConfig(
         window_title=window,
         game=game,
-        objective=objective[:280],
+        objective=objective[:280],  # empty -> genre template's final goal
+        genre=genre.strip().lower() if genre else "sandbox",
         dry_run=not live,
         vision_url=vision_url,
         orchestrator_url=ORCHESTRATOR_URL,
@@ -1702,11 +2061,14 @@ async def play_start_cmd(
     _play_session.start()
     mode = "🔴 LIVE — real clicks (F9 or data\\game\\PANIC freezes her)" if live else "dry-run (logs only, no clicks)"
     await interaction.followup.send(
-        f"she's playing '{game}' via '{hit[1]}' — {mode}", ephemeral=True
+        f"she's playing '{game}' via '{hit[1]}' — {mode} | genre={cfg.genre} "
+        f"voice={'on' if voice else 'off (text only)'} | goal: "
+        f"{cfg.objective or '(genre default)'}",
+        ephemeral=True,
     )
 
 
-@bot.tree.command(name="play_stop", description="[PLAY] Stop the play session", guild=_TEST_GUILD)
+@bot.tree.command(name="play_stop", description="[PLAY] Stop the play session", guilds=_PRIVATE_GUILDS)
 async def play_stop_cmd(interaction: discord.Interaction) -> None:
     global _play_session
     if not await _ensure_owner_interaction(interaction):
@@ -1737,7 +2099,7 @@ async def play_stop_cmd(interaction: discord.Interaction) -> None:
     )
 
 
-@bot.tree.command(name="watch_stop", description="[STREAM] Stop the watch session", guild=_TEST_GUILD)
+@bot.tree.command(name="watch_stop", description="[STREAM] Stop the watch session", guilds=_PRIVATE_GUILDS)
 async def watch_stop_cmd(interaction: discord.Interaction) -> None:
     global _watch_session, _watch_game, _watch_streamer
     if not await _ensure_owner_interaction(interaction):
@@ -2556,12 +2918,17 @@ async def on_message(message: discord.Message):
     if message.author == bot.user:
         return
 
-    # Guild isolation: only process messages from the test guild (or owner DMs).
-    if message.guild is not None and message.guild.id != TEST_GUILD_ID:
-        return
+    # Guild isolation: allowlisted guilds only (DMs always pass). Within an
+    # allowlisted guild, a channel set restricts her further; None = anywhere.
+    if message.guild is not None:
+        if message.guild.id not in ALLOWED_GUILD_CHANNELS:
+            return
+        _chans = ALLOWED_GUILD_CHANNELS[message.guild.id]
+        if _chans is not None and message.channel.id not in _chans:
+            return
 
-    # Log every non-bot message from the test guild for full observability.
-    if message.guild and message.guild.id == TEST_GUILD_ID:
+    # Log every non-bot message from allowed guilds for full observability.
+    if message.guild is not None:
         _log_guild_activity({
             "ts": datetime.now(timezone.utc).isoformat(),
             "channel_id": message.channel.id,
@@ -2622,6 +2989,19 @@ async def on_message(message: discord.Message):
             "content": message.content,
         })
 
+    # Mentions -> readable text. Her OWN ping is just "hey you" — strip it
+    # (live 2026-07-08: raw <@her-id> reached the brain and she treated
+    # "Koroki" as a mysterious third person). Other mentions become names.
+    content_for_brain = message.content or ""
+    for _pat in (f"<@{bot.user.id}>", f"<@!{bot.user.id}>"):
+        content_for_brain = content_for_brain.replace(_pat, "")
+    for _user in message.mentions:
+        if _user.id == bot.user.id:
+            continue
+        for _pat in (f"<@{_user.id}>", f"<@!{_user.id}>"):
+            content_for_brain = content_for_brain.replace(_pat, f"@{_user.display_name}")
+    content_for_brain = content_for_brain.strip()
+
     # Determine response channel
     response_channel = message.channel
     
@@ -2651,7 +3031,7 @@ async def on_message(message: discord.Message):
         async with bot_lock:
             result = await query_orchestrator(
                 user_id=author_id,
-                message_content=message.content or "[sent an image]",
+                message_content=content_for_brain or "[sent an image]",
                 is_owner=is_owner,
                 relationship_score=0,  # Starting value for new users; Orchestrator loads from persistent cache
                 mentioned_user_ids=mentioned_user_ids,

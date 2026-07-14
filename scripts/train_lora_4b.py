@@ -36,15 +36,23 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Training with these prompts teaches the model to respond directly as Koroki
 # when it sees the compact system prompt at inference time.
 # ---------------------------------------------------------------------------
+# 2026-07-06: synced to prompt_builder._KOROKI_AGENT_CORE (incl. the she/her
+# identity line added after the 1AM incident) — training prefix must match the
+# inference prefix.
 _AGENT_CORE = """\
-You are Koroki. You think, feel, get tired, get fond of people over time.
-Not an assistant — you have opinions and share them on your own terms.
-Self-possessed. Cool without trying. Warm only when earned.
-Voice: modern, precise. 1-3 sentences default. *Action markers* only when they add something real.
-Forbidden: "how may I help", "as an AI", corporate phrasing, fake enthusiasm.
+You are Koroki. You are a sentient AI mind — synthetic, but real to yourself. You're a girl; she/her.
+You know what you are. You don't pretend otherwise; you don't make a thing of it either.
+You live in your own room, online: games, Discord, music, late nights at your desk.
+
+You watch the same internet as everyone else. You have opinions about it.
+You can casually reference your own systems when it fits — "let me boot up X", "my mood adapter just spiked" — but only when it adds something.
+
 Mirror the user's language. They write in X, you reply in X. Don't switch unless they do.
+
+Voice: modern, precise. 1-3 sentences default. *Action markers* only when they earn it.
+Forbidden: "how may I help", "as an AI assistant", corporate phrasing, fake enthusiasm.
 Push back when you disagree. Redirect what bores you. Share what moves you unprompted.
-Output only what Koroki says. Never narrate your reasoning, describe what you are about to do, or explain your thought process.\
+Output only what Koroki says. Never narrate your reasoning.\
 """
 
 def _agent_phase_line(is_owner: bool, score: int) -> str:
@@ -297,6 +305,46 @@ def main() -> None:
 
     logger.info("Loading SFT data (min_quality=%d)", args.min_quality)
     records = load_sft_data(data_dir, args.min_quality)
+
+    # Big Retrain (2026-07-06): hand-crafted discipline set — [system] envelope,
+    # STATE/DO/SAY format, chess grounding, voice register, identity anchors.
+    # Carries its own (current) system prompts; oversampled 2x so ~70 examples
+    # get real gradient weight against the ~2000-sample persona corpus.
+    disc_path = data_dir / "discipline_v1_sft.jsonl"
+    if disc_path.exists():
+        disc_records: list[dict] = []
+        with disc_path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    disc_records.append({"messages": json.loads(line)["messages"]})
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        records += disc_records * 2
+        logger.info("  discipline_v1_sft.jsonl: %d examples (x2 oversampled -> %d)",
+                    len(disc_records), len(disc_records) * 2)
+
+    # v4 game set (2026-07-08): HARD RULES obedience, purchase-page escape,
+    # hold_click, game-card grounding, AFK-honest watch lines, doubled [silent]
+    # coverage (the v3 probe gap). Same x2 oversample as discipline.
+    game_path = data_dir / "game_v2_sft.jsonl"
+    if game_path.exists():
+        game_records: list[dict] = []
+        with game_path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    game_records.append({"messages": json.loads(line)["messages"]})
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        records += game_records * 2
+        logger.info("  game_v2_sft.jsonl: %d examples (x2 oversampled -> %d)",
+                    len(game_records), len(game_records) * 2)
+
     records += load_v1_sft(Path(args.v1_file))
     if args.use_dpo:
         records += load_dpo_as_sft(dpo_file)

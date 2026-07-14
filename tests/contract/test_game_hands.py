@@ -48,9 +48,12 @@ def test_unknown_action_rejected():
 def test_vocabulary_is_closed():
     # Growing this set is a CONSCIOUS act — update here only alongside real
     # executor support + parser support + rails review.
+    # hold_click added 2026-07-08 (GM2 wave 2): executor = mouseDown/sleep/
+    # mouseUp with finally-unstick; parser = DO grammar + prompt docs; rails =
+    # commerce-risk check + landing-zone tax + RuleBook guard all apply.
     assert ACTION_TYPES == {
         "click", "double_click", "right_click", "move_to",
-        "press", "hold", "scroll", "wait",
+        "press", "hold", "hold_click", "scroll", "wait",
     }
 
 

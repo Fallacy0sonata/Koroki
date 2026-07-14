@@ -1962,7 +1962,7 @@ EXAMPLES: list[tuple[str, str, int, bool]] = [
     ("explain gravity briefly", "things attract each other. mass-based", 8, False),
     ("what year is it", "depends on calendar. but yeah this year", 10, False),
 
-    # ─── THAI (55 — drafted by Claude, USER POLISHES HERE) ─────────────────
+    # ─── THAI (55 — draft, polish here) ─────────────────
     # These are starter drafts. Grammar should be roughly right but register may
     # be off (too polite/formal in places, possibly wrong particles, possibly
     # masculine-coded particles by accident). Things to fix when reviewing:

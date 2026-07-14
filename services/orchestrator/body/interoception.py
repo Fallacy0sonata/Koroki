@@ -1,7 +1,7 @@
 """
 Interoception — body state → natural language for the LLM.
 
-Per CLAUDE.md captain-in-cabin philosophy: the LLM (captain) never sees raw
+Per the design docs captain-in-cabin philosophy: the LLM (captain) never sees raw
 numbers from any subsystem. It reads a "felt-state snapshot" — natural
 language describing what Koroki currently experiences.
 

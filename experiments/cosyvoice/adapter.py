@@ -37,6 +37,7 @@ from typing import Annotated
 import numpy as np
 import soundfile as sf
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -54,6 +55,30 @@ _tts = None
 _synth_lock = asyncio.Lock()
 
 
+def _load_trt_enabled() -> bool:
+    """OPT-O2: TensorRT for the flow estimator (RTF stage, not first-chunk).
+
+    settings.yaml models.tts.cosyvoice_load_trt is the source of truth;
+    COSYVOICE_LOAD_TRT env overrides for tests. Read directly (not via
+    shared.utils) because this adapter deliberately has no main-repo imports.
+    """
+    env = os.environ.get("COSYVOICE_LOAD_TRT", "").strip().lower()
+    if env in ("1", "true", "yes"):
+        return True
+    if env in ("0", "false", "no"):
+        return False
+    try:
+        import yaml
+
+        cfg = yaml.safe_load(
+            (_REPO_ROOT / "config" / "settings.yaml").read_text(encoding="utf-8")
+        )
+        return bool(cfg.get("models", {}).get("tts", {}).get("cosyvoice_load_trt", False))
+    except Exception as exc:
+        logger.warning("settings.yaml read failed (%s) — load_trt off", exc)
+        return False
+
+
 # ── contract (mirror of experiments/index-tts/adapter.py) ────────────
 
 
@@ -65,8 +90,35 @@ class SynthesizeRequest(BaseModel):
     emotion_intensity: Annotated[int, Field(ge=0, le=100)] = 50
     emotion_variant: str | None = Field(default=None, max_length=64)
     audio_prompt: str | None = None
+    # "instruct2" (default): instruct text carries style, reference = timbre
+    # only (CosyVoice strips the reference's speech tokens from generation —
+    # why she sounded "neutralized" vs the same sample on IndexTTS, owner
+    # 2026-07-06). "cross_lingual": reference's PROSODY/character rides into
+    # generation (the m4 "most lifeful" mode); no instruct control — emotion
+    # comes from reference choice (the reference-bank plan).
+    synthesis_mode: str | None = Field(default=None, max_length=24)
     # IndexTTS2 blend order: [happy, angry, sad, afraid, disgusted, melancholic, surprised, calm]
     emo_vector: list[float] | None = None
+
+
+# Delivery variants — additive instruct suffixes selected via the (previously
+# dormant) emotion_variant request field. First user: wavebench, whose synth
+# read "too english-ed, like straight from book english learning" (owner,
+# 2026-07-05) — formal text read formally. Production chat sends no variant
+# and is untouched.
+_VARIANT_SUFFIX: dict[str, str] = {
+    "conversational": (
+        " Casual everyday chat delivery — relaxed and spontaneous, like talking "
+        "to a friend, never like reading a script aloud."
+    ),
+}
+
+
+def _apply_variant(instruct: str, variant: str | None) -> str:
+    extra = _VARIANT_SUFFIX.get((variant or "").strip().lower())
+    if not extra:
+        return instruct
+    return instruct.replace("<|endofprompt|>", extra + "<|endofprompt|>")
 
 
 def _resolve_voice_sample(audio_prompt: str | None) -> str:
@@ -80,6 +132,57 @@ def _resolve_voice_sample(audio_prompt: str | None) -> str:
         logger.warning("EN_sample.wav missing, using: %s", wav)
         return str(wav)
     raise FileNotFoundError("No voice sample found in voice_samples/")
+
+
+# ── emotion reference bank (research arc item 2, built 2026-07-07) ───
+# Koroki-voiced acted-emotion references (RAVDESS → Korokiv5 RVC, built by
+# scripts/build_emotion_reference_bank.py). In cross_lingual mode the
+# reference's PROSODY rides into generation (instruct2 strips it to timbre —
+# LEGACY 2026-07-06), so the reference IS the emotion control. Emotions the
+# bank lacks (teasing/playful/tired — no acted source) keep the default
+# instruct2 path; EN_sample already carries the teasing register natively.
+# Multiple actors per emotion: picker takes first alphabetical — after the
+# ear-check, delete the losing actors' wavs and the winner is the pick.
+
+_BANK_DIR = _REPO_ROOT / "voice_samples" / "emotion_bank"
+_BANK_MIN_INTENSITY = 55  # mild feelings stay on the default voice
+_BANK_MAP = {  # her emotion bucket → RAVDESS emotion in the bank
+    "happy": "happy", "excited": "happy", "sad": "sad", "melancholic": "sad",
+    "calm": "calm", "warm": "calm", "angry": "angry", "annoyed": "angry",
+    "afraid": "fearful", "surprised": "surprised",
+}
+
+
+def _bank_enabled() -> bool:
+    """settings.yaml models.tts.emotion_reference_bank; COSYVOICE_EMOTION_BANK
+    env overrides for tests. Same pattern as _load_trt_enabled."""
+    env = os.environ.get("COSYVOICE_EMOTION_BANK", "").strip().lower()
+    if env in ("1", "true", "yes"):
+        return True
+    if env in ("0", "false", "no"):
+        return False
+    try:
+        import yaml
+
+        cfg = yaml.safe_load(
+            (_REPO_ROOT / "config" / "settings.yaml").read_text(encoding="utf-8")
+        )
+        return bool(cfg.get("models", {}).get("tts", {}).get("emotion_reference_bank", False))
+    except Exception as exc:
+        logger.warning("settings.yaml read failed (%s) — emotion bank off", exc)
+        return False
+
+
+def _bank_reference(emotion: str, intensity: int) -> str | None:
+    """Bank wav for a felt emotion, or None → default path untouched."""
+    if intensity < _BANK_MIN_INTENSITY:
+        return None
+    key = (emotion or "").strip().lower()
+    key = _BANK_MAP.get(_ALIASES.get(key, key))
+    if not key:
+        return None
+    hits = sorted(_BANK_DIR.glob(f"{key}__actor*.wav"))
+    return str(hits[0]) if hits else None
 
 
 # ── emotion bridge: her affect → acoustic instruct + speed ───────────
@@ -184,8 +287,11 @@ def build_instruct(emotion: str, intensity: int, emo_vector: list[float] | None)
     base, strong, speed = _EMOTION_MAP.get(key, _EMOTION_MAP["neutral"])
     instruct = strong if intensity >= 60 else base
     if intensity >= 60 and key != "neutral":
-        # strong tier already exaggerated; extreme intensity slows/speeds a touch more
-        speed = speed + (speed - 1.0) * 0.5
+        # strong tier already exaggerated; extreme intensity slows/speeds a touch
+        # more — CLAMPED: tired@60 compounded 0.82→0.73 and the owner heard
+        # "insanely weird slowed down" (2026-07-06 tag batch #04). 0.8 is the
+        # floor where slow still sounds intentional rather than broken.
+        speed = max(0.8, min(1.15, speed + (speed - 1.0) * 0.5))
     return instruct + "<|endofprompt|>", round(max(0.75, min(1.15, speed)), 3)
 
 
@@ -193,10 +299,20 @@ def build_instruct(emotion: str, intensity: int, emo_vector: list[float] | None)
 
 
 def _expected_duration(text: str) -> float:
-    """Rough speech-duration estimate for the duration-sanity guard."""
+    """Rough speech-duration estimate for the duration-sanity guard.
+
+    Floor recalibrated 2026-07-05: the old max(1.0, ...) made a natural 0.5s
+    "okay" (4 chars -> expected 1.0s, lower band 0.6s) fail undershoot THREE
+    times per reply — 16s of retries for a correct result, minutes under queue
+    contention (the "voice is taking too long to arrive" report, 2026-07-04).
+    """
+    # Vocal-event tokens produce audio without "speaking" their characters —
+    # count each as ~0.8s of expected sound, not as 10 letters of text.
+    n_events = text.count("[laughter]") + text.count("[breath]") + text.count("[sigh]")
+    text = text.replace("[laughter]", "").replace("[breath]", "").replace("[sigh]", "")
     cjk = sum(1 for ch in text if "぀" <= ch <= "ヿ" or "一" <= ch <= "鿿")
     latin = max(0, len(text) - cjk)
-    return max(1.0, 0.075 * latin + 0.18 * cjk + 0.5)
+    return max(0.6, 0.075 * latin + 0.18 * cjk + 0.35 + 0.8 * n_events)
 
 
 def _trim_tail_garbage(wav: np.ndarray, sr: int) -> np.ndarray:
@@ -232,13 +348,22 @@ def _peak_guard(wav: np.ndarray) -> np.ndarray:
 
 
 def _glitch_score(wav: np.ndarray, sr: int) -> int:
-    """Max per-100ms count of violent sample-to-sample jumps.
+    """Max per-100ms count of violent sample-to-sample jumps, LOUDNESS-NORMALIZED.
 
-    Broken 'mic damage' audio shows bursts of 300-1000 jumps per 100 ms;
-    clean speech stays well under ~200 (measured on owner-flagged sample vs
-    known-good, 2026-07-04). Used to reseed-retry glitchy generations.
+    History: the original metric compared raw diffs against a fixed 0.25 —
+    which made it a covert loudness detector: expressive tiers (louder) scored
+    557-883 and overlapped the genuine mic-broke class (777-1011), so the
+    guard reseeded good audio (2026-07-05, second recalibration attempt).
+    Peak-normalizing first makes the score measure waveform ROUGHNESS relative
+    to its own scale: broken audio keeps its structural discontinuities, loud
+    clean speech drops back to the clean band.
     """
-    diff = np.abs(np.diff(wav))
+    if not len(wav):
+        return 0
+    peak = float(np.max(np.abs(wav)))
+    if peak < 1e-6:
+        return 0
+    diff = np.abs(np.diff(wav / peak))
     bucket = max(1, int(0.1 * sr))
     n = len(diff) // bucket
     if n == 0:
@@ -247,25 +372,87 @@ def _glitch_score(wav: np.ndarray, sr: int) -> int:
     return int(counts.max())
 
 
-_GLITCH_THRESHOLD = 300  # per-100ms jump count that marks a broken generation
+# DEMOTED TO OBSERVABILITY 2026-07-05: even normalized, known-good expressive
+# speech measures up to ~700 (sibilants + dynamics read as "jumps") — the metric
+# cannot separate expressive-good from broken at ANY threshold. The mic-broke
+# class's root cause (tilde tokens) is fixed at the text layer, so the check
+# no longer gates reseeds; it only LOGS suspicious scores to collect evidence
+# for a proper spectral detector if the artifact class ever returns.
+_GLITCH_LOG_THRESHOLD = 900
 
 
 # ── synthesis ────────────────────────────────────────────────────────
 
 
-def _synth_once(text: str, instruct: str, prompt_path: str, speed: float, seed: int) -> np.ndarray:
+def _synth_once(text: str, instruct: str, prompt_path: str, speed: float, seed: int,
+                mode: str = "instruct2") -> np.ndarray:
     import torch
     from cosyvoice.utils.common import set_all_random_seed
 
     set_all_random_seed(seed)
     chunks = []
-    try:
-        gen = _tts.inference_instruct2(text, instruct, prompt_path, stream=False, speed=speed)
-    except TypeError:  # older signature without speed
-        gen = _tts.inference_instruct2(text, instruct, prompt_path, stream=False)
+    if mode == "cross_lingual":
+        # Reference-driven: the sample's prosody/character conditions generation
+        # (instruct is ignored by this mode). Known quirk: occasional rushed
+        # opening (owner heard it in matrix m4) — watch, don't fear.
+        try:
+            gen = _tts.inference_cross_lingual(text, prompt_path, stream=False, speed=speed)
+        except TypeError:
+            gen = _tts.inference_cross_lingual(text, prompt_path, stream=False)
+    else:
+        try:
+            gen = _tts.inference_instruct2(text, instruct, prompt_path, stream=False, speed=speed)
+        except TypeError:  # older signature without speed
+            gen = _tts.inference_instruct2(text, instruct, prompt_path, stream=False)
     for out in gen:
         chunks.append(out["tts_speech"])
     return torch.cat(chunks, dim=1).squeeze(0).float().cpu().numpy()
+
+
+# Textual laughs -> the model's [laughter] vocal-event token (2026-07-06 ear
+# verdict: [laughter] mid-sentence renders a REAL giggle in instruct2 — m1/m3
+# of the tag matrix). When she writes a laugh, her voice now actually laughs
+# instead of reading "haha" aloud. Conservative: max one event per utterance,
+# never at the very start (start-position tags are unreliable per repo docs).
+_LAUGH_TEXT_RE = None  # compiled lazily below (module import order)
+
+
+def _laughs_to_tokens(text: str) -> str:
+    import re
+    global _LAUGH_TEXT_RE
+    if _LAUGH_TEXT_RE is None:
+        _LAUGH_TEXT_RE = re.compile(
+            r"(?<!\w)(?:a?ha(?:ha)+|e?he(?:he)+|ehe+|lol|lmao|ふふ+|えへへ+|あはは+)(?!\w)",
+            re.IGNORECASE,
+        )
+    replaced = 0
+
+    def _sub(m: "re.Match[str]") -> str:
+        nonlocal replaced
+        if replaced:                      # one event per utterance
+            return ""                     # extra laugh text is dropped, not spoken
+        replaced += 1
+        return "[laughter]"
+
+    out = re.sub(r"\s{2,}", " ", _LAUGH_TEXT_RE.sub(_sub, text)).strip()
+    if not replaced:
+        return text
+    # Start-position tags are unreliable (and she LOVES opening with "ehehe" —
+    # the first live clip lost its giggle to a silent drop here, 2026-07-06).
+    # Relocate a leading token to just after the first clause boundary, or
+    # after the 5th word — mid-position is the ear-verified sweet spot.
+    if out.startswith("[laughter]"):
+        rest = out[len("[laughter]"):].strip(" ,")
+        if rest:
+            m2 = re.search(r"[,.!?;、。！？]", rest)
+            cut = m2.end() if m2 and len(rest[: m2.end()].split()) <= 8 else None
+            if cut is None:
+                words = rest.split()
+                cut = len(" ".join(words[: min(5, len(words))]))
+            out = (rest[:cut].rstrip() + " [laughter] " + rest[cut:].lstrip()).strip()
+            out = re.sub(r"\s{2,}", " ", out)
+        # text that IS only a laugh keeps the token alone — better than silence
+    return out
 
 
 def _normalize_text(text: str) -> str:
@@ -275,6 +462,7 @@ def _normalize_text(text: str) -> str:
     # like a broken mic" on "ohi~ genuine yeah?" (glitch bursts confirmed by
     # discontinuity analysis, 2026-07-04). Her text keeps the ~; TTS never sees it.
     text = text.replace("~", "")
+    text = _laughs_to_tokens(text)
     text = re.sub(r"[.]{2,}\s*$", ".", text)
     text = re.sub(r"[…]\s*$", ".", text)
     text = re.sub(r"[.]{2,}", ", ", text)
@@ -297,7 +485,8 @@ def _normalize_text(text: str) -> str:
     return text
 
 
-def _run_synthesis(text: str, instruct: str, prompt_path: str, speed: float, label: str) -> tuple[np.ndarray, int]:
+def _run_synthesis(text: str, instruct: str, prompt_path: str, speed: float, label: str,
+                   mode: str = "instruct2") -> tuple[np.ndarray, int]:
     """Blocking synthesis with the duration-sanity retry guard.
 
     Two failure modes, both duration-detectable:
@@ -313,19 +502,22 @@ def _run_synthesis(text: str, instruct: str, prompt_path: str, speed: float, lab
     best_score = -1.0
     for attempt in range(3):
         seed = random.randint(0, 2**31 - 1)
-        wav = _synth_once(text, instruct, prompt_path, speed, seed)
+        wav = _synth_once(text, instruct, prompt_path, speed, seed, mode=mode)
         dur = len(wav) / sr
         glitch = _glitch_score(wav, sr)
-        if lo <= dur <= hi and glitch < _GLITCH_THRESHOLD:
+        if glitch >= _GLITCH_LOG_THRESHOLD:
+            # Observability only — never gates (see _GLITCH_LOG_THRESHOLD note).
+            logger.warning("[%s] suspicious glitch score %d (not gating)", label, glitch)
+        if lo <= dur <= hi:
             best = wav
             break
-        # Score fallbacks: duration closeness minus a glitch penalty.
-        score = -abs(float(np.log((dur + 0.1) / expected))) - (glitch / 1000.0)
+        # Duration failed — keep the closest attempt as fallback.
+        score = -abs(float(np.log((dur + 0.1) / expected)))
         if score > best_score:
             best, best_score = wav, score
-        logger.warning("[%s] guard: %.1fs vs expected %.1fs [%.1f-%.1f], glitch=%d "
+        logger.warning("[%s] guard: %.1fs vs expected %.1fs [%.1f-%.1f] "
                        "(attempt %d) — reseeding", label, dur, expected, lo, hi,
-                       glitch, attempt + 1)
+                       attempt + 1)
     wav = _trim_tail_garbage(best, sr)
     wav = _peak_guard(wav)
     return wav, sr
@@ -340,8 +532,39 @@ _WARMUP_TEXT = (
 # ── app ──────────────────────────────────────────────────────────────
 
 
-async def _startup():
+def _sleeping_now() -> bool:
+    """She's asleep and sleep-offload owns the VRAM — don't load at startup.
+
+    Owner-found bug (2026-07-07): killing the voice process during her sleep
+    made the supervisor revive it MODEL-LOADED — the offload hook only fires
+    at the wake->asleep transition and never re-asserts. Reads the sleep state
+    file directly (this adapter stays main-repo-import-free). Fail-open: any
+    read problem means load normally.
+    """
+    try:
+        import json as _json
+
+        st = _json.loads(
+            (_REPO_ROOT / "data" / "body" / "sleep_state.json").read_text(encoding="utf-8")
+        )
+        if st.get("state") not in ("asleep", "falling_asleep"):
+            return False
+        import yaml
+
+        cfg = yaml.safe_load(
+            (_REPO_ROOT / "config" / "settings.yaml").read_text(encoding="utf-8")
+        )
+        return bool(cfg.get("sleep", {}).get("vram_offload", False))
+    except Exception:
+        return False
+
+
+async def _startup(force: bool = False):
     global _tts
+    if not force and _sleeping_now():
+        logger.info("she's asleep (sleep offload owns VRAM) — starting UNLOADED; "
+                    "the waking hook or POST /load brings the model up")
+        return
     try:
         from cosyvoice.cli.cosyvoice import CosyVoice2
     except Exception:
@@ -352,8 +575,17 @@ async def _startup():
         return
     try:
         t0 = time.time()
-        _tts = CosyVoice2(str(_MODEL_DIR), load_jit=False, load_trt=False, fp16=True)
-        logger.info("CosyVoice2 ready in %.1fs (sr=%d)", time.time() - t0, _tts.sample_rate)
+        use_trt = _load_trt_enabled()
+        # load_trt expects flow.decoder.estimator.fp16.mygpu.plan in the model
+        # dir — build it OFFLINE with scripts/build_cosyvoice_trt.py first, or
+        # the first load blocks for minutes building it in-process.
+        _tts = CosyVoice2(str(_MODEL_DIR), load_jit=False, load_trt=use_trt, fp16=True)
+        logger.info(
+            "CosyVoice2 ready in %.1fs (sr=%d, flow=%s)",
+            time.time() - t0,
+            _tts.sample_rate,
+            "tensorrt" if use_trt else "pytorch",
+        )
     except Exception:
         logger.exception("Failed to initialize CosyVoice2")
         return
@@ -414,7 +646,7 @@ async def load_model():
     global _tts
     if _tts is not None:
         return {"status": "already_loaded"}
-    await _startup()
+    await _startup(force=True)  # explicit load overrides the sleep check
     if _tts is None:
         raise HTTPException(status_code=500, detail="CosyVoice failed to reload")
     return {"status": "loaded"}
@@ -431,13 +663,23 @@ async def synthesize(req: SynthesizeRequest):
 
     label = req.request_id or "req"
     instruct, speed = build_instruct(req.emotion, req.emotion_intensity, req.emo_vector)
+    instruct = _apply_variant(instruct, req.emotion_variant)
     logger.info("[%s] Synthesizing %d chars emotion=%s intensity=%d -> instruct=%r speed=%.2f",
                 label, len(req.text), req.emotion, req.emotion_intensity,
                 instruct[:60], speed)
+    mode = (req.synthesis_mode or "instruct2").strip().lower()
+    # Emotion reference bank: strong felt emotion + a bank wav for it → the
+    # reference carries the emotion (cross_lingual). Callers that pin their own
+    # prompt or mode are never overridden.
+    if req.audio_prompt is None and req.synthesis_mode is None and _bank_enabled():
+        bank = _bank_reference(req.emotion, req.emotion_intensity)
+        if bank:
+            prompt_path, mode = bank, "cross_lingual"
+            logger.info("[%s] emotion bank: %s -> cross_lingual", label, Path(bank).name)
     try:
         async with _synth_lock:
             wav, sr = await asyncio.to_thread(
-                _run_synthesis, req.text, instruct, prompt_path, speed, label
+                _run_synthesis, req.text, instruct, prompt_path, speed, label, mode
             )
         import io
         buf = io.BytesIO()
@@ -448,6 +690,73 @@ async def synthesize(req: SynthesizeRequest):
     except Exception as e:
         logger.exception("[%s] synthesis failed", label)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/synthesize_stream")
+async def synthesize_stream(req: SynthesizeRequest):
+    """Streaming synthesis — raw int16 mono PCM chunks as the model generates.
+
+    Added 2026-07-05 for the wavebench latency ladder (first-audio target
+    200-500 ms). Production Koroki replies stay on /synthesize: streamed audio
+    can't run the duration/glitch guards (you can't validate a partial clip),
+    so this endpoint trades self-healing for latency. Same model, same lock —
+    a stream holds the GPU until it finishes, exactly like an offline call.
+    Sample rate rides the X-Sample-Rate header.
+    """
+    if _tts is None:
+        raise HTTPException(status_code=503, detail="CosyVoice not loaded")
+    try:
+        prompt_path = _resolve_voice_sample(req.audio_prompt)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    label = req.request_id or "stream"
+    text = _normalize_text(req.text)
+    instruct, speed = build_instruct(req.emotion, req.emotion_intensity, req.emo_vector)
+    instruct = _apply_variant(instruct, req.emotion_variant)
+    logger.info("[%s] Stream-synthesizing %d chars emotion=%s intensity=%d speed=%.2f",
+                label, len(text), req.emotion, req.emotion_intensity, speed)
+
+    import queue as _queue
+    import threading as _threading
+    chunks: _queue.Queue = _queue.Queue(maxsize=16)
+
+    def _producer() -> None:
+        try:
+            try:
+                gen = _tts.inference_instruct2(text, instruct, prompt_path,
+                                               stream=True, speed=speed)
+            except TypeError:  # older signature without speed
+                gen = _tts.inference_instruct2(text, instruct, prompt_path, stream=True)
+            for out in gen:
+                wav = out["tts_speech"].numpy().flatten()
+                pcm = (np.clip(wav, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
+                chunks.put(pcm)
+        except Exception:
+            logger.exception("[%s] stream synthesis failed", label)
+        finally:
+            chunks.put(None)
+
+    async def _gen():
+        async with _synth_lock:
+            t0 = time.perf_counter()
+            _threading.Thread(target=_producer, daemon=True, name=f"cv-stream-{label}").start()
+            first = True
+            while True:
+                item = await asyncio.to_thread(chunks.get)
+                if item is None:
+                    break
+                if first:
+                    logger.info("[%s] first chunk after %.0f ms", label,
+                                (time.perf_counter() - t0) * 1000)
+                    first = False
+                yield item
+
+    return StreamingResponse(
+        _gen(),
+        media_type="application/octet-stream",
+        headers={"X-Sample-Rate": str(_tts.sample_rate)},
+    )
 
 
 def _parse_args() -> argparse.Namespace:

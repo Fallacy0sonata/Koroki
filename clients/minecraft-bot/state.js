@@ -58,6 +58,12 @@ function setGoal(goalName) {
   _save();
 }
 
+/** What she plans to do after this — feeds the "next:" context for commentary. */
+function setQueue(goalNames) {
+  _state.goalQueue = (goalNames || []).slice(0, 3);
+  _save();
+}
+
 function completeGoal(goalName, success = true) {
   if (_state.currentGoal?.name === goalName) {
     _state.goalHistory = [
@@ -109,4 +115,4 @@ function getContext() {
 
 _load();
 
-module.exports = { onSpawn, setGoal, completeGoal, addResources, getContext };
+module.exports = { onSpawn, setGoal, setQueue, completeGoal, addResources, getContext };

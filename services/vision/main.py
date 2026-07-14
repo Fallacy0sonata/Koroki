@@ -201,6 +201,36 @@ async def point(req: PointRequest) -> dict:
     return {"points": points, "count": len(points)}
 
 
+class OcrRequest(BaseModel):
+    request_id: str = Field(default="", max_length=128)
+    image_b64: str = Field(..., min_length=1, max_length=12_000_000)
+
+
+@app.post("/v1/ocr")
+async def ocr(req: OcrRequest) -> dict:
+    """Full-frame game-UI OCR — exact text/numbers, CPU-only, ~300 ms.
+
+    Division of labor (2026-07-06, bench-driven): OCR reads WHAT the screen
+    says, moondream reads what it MEANS (/v1/describe) and WHERE (/v1/point).
+    No VLM load, no VRAM, no game-session coupling.
+    """
+    from .ocr import get_ocr
+
+    try:
+        image = base64.b64decode(req.image_b64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid base64 image: {exc}") from exc
+    t0 = time.time()
+    try:
+        lines = await anyio.to_thread.run_sync(lambda: get_ocr().read(image))
+    except Exception as exc:
+        logger.error("[%s] ocr failed: %s", req.request_id, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"ocr failed: {exc}") from exc
+    logger.info("[%s] ocr -> %d lines in %.0f ms",
+                req.request_id, len(lines), (time.time() - t0) * 1000)
+    return {"lines": lines, "full_text": " | ".join(l["text"] for l in lines)}
+
+
 @app.post("/v1/game/enter")
 async def game_enter(req: GameEnterRequest) -> dict:
     global _game_session

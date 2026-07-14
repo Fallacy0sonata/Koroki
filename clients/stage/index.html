@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Koroki Stage</title>
+<style>
+  /* Transparent everywhere — OBS browser source captures this page AS the
+     broadcast scene. No margins, no background, nothing but the canvas. */
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<script src="vendor/pixi.min.js"></script>
+<script src="vendor/pixi-filters.min.js"></script>
+<script type="module" src="stage.js"></script>
+</body>
+</html>

@@ -89,33 +89,102 @@ class FrameGate:
 
 @dataclass
 class WatchState:
-    """What she knows about this session so far (gaming-eyes ranking S1).
+    """What she knows about this session so far (gaming-eyes ranking S1; grown
+    into the GM2 session world-model 2026-07-08).
 
     Overwrite rule: `current_scene` is REPLACED every look; `recent_events` is
     a small bounded window. Temporal authority beats semantic relevance —
     stale facts get overwritten, never retrieved from a growing log.
+
+    World-model additions (GM2 step 3, from the owner's first live session):
+    session age, activity clock, and idle awareness — half a minute of AFK
+    must read as "nothing is happening", never as hallucinated action
+    (Sol's RNG "he's fighting someone", 2026-07-08).
     """
 
     game: Optional[str] = None
     current_scene: str = ""
+    scene_ts: float = 0.0
+    # Exact-text layer (LIMBS wave 1, 2026-07-09): the words actually on screen
+    # — button labels, menu items, numbers. The VLM scene is prose; click
+    # targets ground on THESE. Overwrite semantics like everything else here.
+    ocr_text: str = ""
+    ocr_ts: float = 0.0
     recent_events: collections.deque = field(
         default_factory=lambda: collections.deque(maxlen=4)
     )
+    session_started_ts: float = field(default_factory=time.time)
+    last_change_ts: float = field(default_factory=time.time)
 
     def note_scene(self, description: str) -> None:
         self.current_scene = description  # overwrite — the only current truth
+        self.scene_ts = time.time()
+
+    def note_ocr(self, lines: Optional[list]) -> None:
+        """Overwrite the exact-text layer from a full-frame OCR pass."""
+        if lines is None:
+            return  # OCR failed — keep the previous text, its age says the rest
+        seen: list[str] = []
+        for line in lines:
+            t = str(line.get("text", "")).strip()
+            if len(t) >= 2 and t not in seen:
+                seen.append(t)
+        self.ocr_text = " | ".join(seen)[:360]
+        self.ocr_ts = time.time()
 
     def note_event(self, summary: str) -> None:
         self.recent_events.append(
             (time.strftime("%H:%M"), summary[:120])
         )
 
+    def snapshot(self) -> dict:
+        """Timestamped blackboard read — every fact carries its age so a
+        consumer (decide payload today, the motor-planner next) applies its
+        own staleness rule instead of trusting old facts as current truth."""
+        now = time.time()
+        return {
+            "game": self.game,
+            "scene": self.current_scene,
+            "scene_age_s": round(now - self.scene_ts, 1) if self.scene_ts else None,
+            "ocr": self.ocr_text,
+            "ocr_age_s": round(now - self.ocr_ts, 1) if self.ocr_ts else None,
+            "idle_s": round(self.idle_seconds(), 1),
+            "session_min": round((now - self.session_started_ts) / 60.0, 1),
+            "recent_events": list(self.recent_events),
+        }
+
+    def note_activity(self) -> None:
+        """Pixels genuinely changed — the world moved."""
+        self.last_change_ts = time.time()
+
+    def idle_seconds(self) -> float:
+        return time.time() - self.last_change_ts
+
     def context_block(self) -> str:
-        """One compact line of session memory for vision asks + commentary."""
-        if not self.recent_events:
-            return ""
-        events = "; ".join(f"{t} {s}" for t, s in self.recent_events)
-        return f"earlier on this stream: {events}"
+        """Compact session memory for vision asks + commentary prompts."""
+        bits: list[str] = []
+        age_min = (time.time() - self.session_started_ts) / 60.0
+        if age_min >= 2:
+            bits.append(f"you've been watching for ~{int(age_min)} min")
+        if self.recent_events:
+            events = "; ".join(f"{t} {s}" for t, s in self.recent_events)
+            bits.append(f"earlier: {events}")
+        # Staleness rule (LIMBS wave 1): an old scene description must never
+        # read as current truth — say how old the last clear look is.
+        if self.current_scene and self.scene_ts:
+            scene_age = time.time() - self.scene_ts
+            if scene_age >= 30:
+                bits.append(
+                    f"your last clear look was {int(scene_age)}s ago — "
+                    "the scene may have moved on"
+                )
+        idle = self.idle_seconds()
+        if idle >= 40:
+            bits.append(
+                f"NOTHING on screen has changed for {int(idle)}s — the player "
+                "is probably AFK or idle; do not invent action"
+            )
+        return "; ".join(bits)
 
 
 # ── window capture (Windows) ─────────────────────────────────────────
@@ -175,6 +244,9 @@ class WatchConfig:
     novelty_threshold: float = 0.5      # 1 - jaccard(prev, cur) must exceed this
     max_describe_tokens: int = 80
     vision_url: str = "http://127.0.0.1:9005"
+    # GM2 step 3: after this long with zero pixel change, ONE idle event fires
+    # (she may note the AFK honestly); resets when the screen moves again.
+    idle_after_seconds: float = 45.0
 
 
 def evaluate_gate(
@@ -223,6 +295,7 @@ class WatchSession:
         self._hwnd: Optional[int] = None
         self._prev_desc: Optional[str] = None
         self._last_spoke_at = 0.0
+        self._idle_reported = False   # one idle event per static stretch
         self._task: Optional[asyncio.Task] = None
         self._running = False
 
@@ -296,7 +369,30 @@ class WatchSession:
         if not pixels_changed:
             self.stats.gated_frames += 1
             logger.debug("frame gate: static (%.3f) — VLM spared", ratio)
+            # GM2 step 3: a long static stretch IS an event (once per stretch).
+            # Honest commentary material — the anti-hallucination counterweight.
+            now = time.time()
+            if (
+                not self._idle_reported
+                and self.state.idle_seconds() >= self.cfg.idle_after_seconds
+                and now - self._last_spoke_at >= self.cfg.cooldown_seconds
+            ):
+                self._idle_reported = True
+                self._last_spoke_at = now
+                self.stats.events += 1
+                idle_note = (
+                    f"the screen has not changed for {int(self.state.idle_seconds())} "
+                    "seconds — the player seems AFK or idle, nothing is happening"
+                )
+                self.state.note_event("player went idle/AFK")
+                logger.info("watch EVENT (idle %.0fs)", self.state.idle_seconds())
+                try:
+                    await self.on_event(idle_note, "idle")
+                except Exception:
+                    logger.error("watch on_event failed", exc_info=True)
             return
+        self.state.note_activity()
+        self._idle_reported = False
 
         desc = await self._describe(png)
         if desc is None:

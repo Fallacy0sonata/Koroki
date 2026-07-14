@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -46,6 +47,31 @@ async def lifespan(app: FastAPI):
     # Autonomic heartbeat — body dynamics advance even when nobody talks to her
     # (2026-07-03 night-one bug: ticks were chat-driven only; see body/heartbeat.py).
     heartbeat_task = asyncio.create_task(run_heartbeat_loop())
+    # Sleep VRAM offload — her voice unloads while she sleeps, reloads at waking
+    # ("like an actual human" — owner 2026-07-04; flag: sleep.vram_offload).
+    try:
+        from .body.sleep_offload import install as _install_sleep_offload
+        _install_sleep_offload()
+    except Exception:
+        logger.warning("sleep offload install failed", exc_info=True)
+
+    # OPT-O4 (2026-07-05): warm the memory-recall embedder off the request path.
+    # Lazy first-use load cost 12.9 s INSIDE the first chat request after every
+    # orchestrator boot (measured: "Recalled memories injected" gap 12.85 s cold
+    # vs 31 ms warm). A background thread eats that cost at startup instead.
+    def _warm_embedder() -> None:
+        try:
+            from .mind.embeddings import get_embedder
+
+            emb = get_embedder()
+            if emb.embed_query("warmup") is not None:
+                logger.info("Recall embedder warmed at startup")
+            else:
+                logger.info("Recall embedder unavailable — recall runs degraded")
+        except Exception:
+            logger.warning("Recall embedder warmup failed", exc_info=True)
+
+    threading.Thread(target=_warm_embedder, daemon=True, name="embedder-warmup").start()
     yield
     thought_task.cancel()
     ns_task.cancel()

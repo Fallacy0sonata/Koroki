@@ -1,0 +1,7 @@
+{
+  "stage": "grpo_8b_c2048",
+  "gpu": "NVIDIA GeForce RTX 3090",
+  "ts": "2026-07-07 11:22:08",
+  "max_completion": 2048,
+  "error": "OutOfMemoryError: CUDA out of memory. Tried to allocate 4.64 GiB. GPU 0 has a total capacity of 23.56 GiB of which 2.58 GiB is free. Including non-PyTorch memory, this process has 20.97 GiB memory in use. Of the allocated memory 17.51 GiB is allocated by PyTorch, and 3.14 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+}

@@ -1,6 +1,6 @@
 """World events — discrete happenings in her environment that CAUSE hormone responses.
 
-The causal chain (CLAUDE.md) made literal: before this module her world had continuous
+The causal chain (the design docs) made literal: before this module her world had continuous
 state (weather, time, lighting) but nothing ever HAPPENED. Now a thunderclap spikes her
 norepinephrine, a bird on the windowsill nudges dopamine, neighbor noise grates cortisol —
 and everything downstream (felt state, thoughts, journal, conversation) inherits the

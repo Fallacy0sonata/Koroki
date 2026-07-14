@@ -1,0 +1,6 @@
+# Private context needed for correct local reasoning in Codex-managed worktrees.
+# Never add .env, OAuth files, certificates, keys, runtime data, or model weights here.
+CLAUDE.md
+LEGACY.md
+docs/master_queue.md
+config/settings.yaml

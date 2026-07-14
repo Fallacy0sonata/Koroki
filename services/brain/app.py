@@ -9,6 +9,7 @@ Exposes:
     WS   /ws/stream     — internal WebSocket stream to orchestrator
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -269,6 +270,10 @@ def _run_startup_warmup(adapter_manager: AdapterManager) -> None:
         logger.info("Brain warmup disabled by config")
         return
 
+    if getattr(adapter_manager, "exl2_engine", None) is not None:
+        logger.info("Brain warmup skipped: exllamav2 engine warms up at load")
+        return
+
     tokenizer = adapter_manager.tokenizer
     model = adapter_manager.model
     if tokenizer is None or model is None:
@@ -332,13 +337,16 @@ async def lifespan(app: FastAPI):
     # Explicitly log active attention backend so FA2 activation is visible at startup.
     attention_backend = "unknown"
     try:
-        model = _adapter_manager.model if _adapter_manager else None
-        config = getattr(model, "config", None)
-        attention_backend = (
-            getattr(config, "_attn_implementation", None)
-            or getattr(config, "attn_implementation", None)
-            or "unknown"
-        )
+        if getattr(_adapter_manager, "exl2_engine", None) is not None:
+            attention_backend = "exllamav2 (matmul, no_sdpa)"
+        else:
+            model = _adapter_manager.model if _adapter_manager else None
+            config = getattr(model, "config", None)
+            attention_backend = (
+                getattr(config, "_attn_implementation", None)
+                or getattr(config, "attn_implementation", None)
+                or "unknown"
+            )
     except Exception:
         attention_backend = "unknown"
     logger.info("Brain attention backend: %s", attention_backend)
@@ -417,7 +425,10 @@ def _parse_tool_calls(text: str) -> tuple[str, list[dict]]:
 
 class GenerateRequest(BaseModel):
     request_id: str
-    message: str = Field(min_length=1, max_length=2000)
+    # 6000, not 2000: internal callers legitimately send long documents — the
+    # journal voicing pass ships the whole day template (~4.3 KB) and 422'd
+    # EVERY night until 2026-07-05 (skip was logged at INFO — invisible).
+    message: str = Field(min_length=1, max_length=6000)
     user_context: UserContextIn
     max_new_tokens: Optional[int] = Field(default=None, ge=16, le=512)
     enable_thinking: bool = True
@@ -543,6 +554,65 @@ async def generate(req: GenerateRequest) -> dict:
         "adapter_used": adapter_name,
         "tool_calls": tool_calls,
     }
+
+
+class PlanRequest(BaseModel):
+    """Schema-locked generation (LIMBS W1.2, the motor-planner's mouth).
+
+    Generic mechanism: the CALLER owns the prompt (the orchestrator's games
+    route builds the planner role); the brain guarantees the output parses
+    against json_schema — lm-format-enforcer masks logits so a malformed plan
+    cannot be emitted. exl2-only: the transformers rollback path has no
+    logit-filter surface, callers must degrade to single-action decides.
+    """
+
+    request_id: str
+    system: str = Field(min_length=1, max_length=2000)
+    message: str = Field(min_length=1, max_length=4000)
+    json_schema: dict
+    max_new_tokens: int = Field(default=256, ge=32, le=512)
+    temperature: float = Field(default=0.3, ge=0.0, le=1.0)
+
+
+@app.post("/v1/plan")
+async def plan(req: PlanRequest) -> dict:
+    """Blocking schema-locked generation — returns the parsed plan object."""
+    if _adapter_manager is None:
+        raise HTTPException(status_code=503, detail="Brain not ready")
+    engine = _adapter_manager.exl2_engine
+    if engine is None or not engine.is_loaded:
+        raise HTTPException(
+            status_code=501,
+            detail="planner requires the exllamav2 engine (transformers rollback has no filters)",
+        )
+
+    # Raw ChatML, thinking OFF by construction: a <think> block cannot start
+    # under the JSON filter, and plans are mechanism, not persona speech.
+    prompt = (
+        f"<|im_start|>system\n{req.system}<|im_end|>\n"
+        f"<|im_start|>user\n{req.message}<|im_end|>\n"
+        f"<|im_start|>assistant\n"
+    )
+    started = time.perf_counter()
+    raw = await asyncio.to_thread(
+        engine.generate_json,
+        prompt,
+        json_schema=req.json_schema,
+        max_new_tokens=req.max_new_tokens,
+        temperature=req.temperature,
+    )
+    try:
+        plan_obj = json.loads(raw)
+    except json.JSONDecodeError:
+        # The filter makes invalid JSON near-impossible; the one real path is
+        # truncation at the token budget. Fail loudly, never half-execute.
+        logger.warning("[%s] plan output truncated at token budget", req.request_id)
+        raise HTTPException(status_code=502, detail="plan generation truncated")
+    logger.info(
+        "[%s] plan generated in %.2fs (%d chars)",
+        req.request_id, time.perf_counter() - started, len(raw),
+    )
+    return {"request_id": req.request_id, "plan": plan_obj}
 
 
 @app.websocket("/ws/stream")

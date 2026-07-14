@@ -1,0 +1,120 @@
+# settings.example.yaml — illustrative configuration.
+#
+# The live system is driven entirely by one config file (this is a redacted
+# template of it). Every service, model, latency budget, and feature is toggled
+# here — behaviour changes without touching code. Exact model choices and tuned
+# recipes are omitted from the public template.
+
+services:
+  orchestrator: { host: "0.0.0.0", port: 9882, url: "http://127.0.0.1:9882" }
+  brain:        { host: "127.0.0.1", port: 9881, url: "http://127.0.0.1:9881" }
+  tts:          { host: "127.0.0.1", port: 9880, url: "http://127.0.0.1:9880", adapter_url: "http://127.0.0.1:9004" }
+  vision:       { host: "127.0.0.1", port: 9005, url: "http://127.0.0.1:9005" }
+
+# VC hearing — phrase = packet burst, end = silence gap; STT on CPU from a local cache.
+ears:
+  enabled: true
+  stt_model: "<STT_MODEL>"
+  language: ""            # "" = autodetect
+  listen_all: false       # true = hear everyone in the VC, not just the owner
+  phrase_gap_ms: 700
+  min_phrase_ms: 350
+  max_phrase_s: 30
+  tone_dims_enabled: false # continuous arousal/dominance/valence per phrase (log-only)
+
+# Screen understanding — lazy-load + idle-unload so VRAM is only used while looking.
+vision:
+  enabled: true
+  model_dir: "path/to/vision-language-model"
+  quant: "int4"
+  idle_unload_seconds: 300
+  unload_after_describe: true
+
+models:
+  brain:
+    name: "path/to/local-llm"
+    engine: "<INFERENCE_ENGINE>"   # transformers | quantized-runtime
+    dtype: "float16"
+    max_memory_gib: 4.5            # cap so a runaway KV cache can't exceed the card
+    discord_max_new_tokens: 120
+    max_new_tokens: 512
+    temperature: 0.7
+    top_p: 0.8
+    repetition_penalty: 1.15
+    startup_warmup_enabled: true   # warm short gens at boot to kill first-turn TTFT spikes
+    prefix_cache: { enabled: true } # pre-compute KV for the static persona prefix
+    owner_profile:
+      display_name: "<OWNER_NAME>"
+      subject_pronoun: "she"
+    # De-assistantization: phrases that must never appear in her voice.
+    anti_assistant_terms: ["how may i assist", "how can i help", "as an ai", "language model"]
+    adapter: "path/to/persona-adapter"   # custom-trained personality LoRA (recipe private)
+  tts:
+    name: "path/to/neural-tts"
+    sample_rate: 24000
+    max_input_chars: 320           # voice latency scales with text length — keep speech tight
+    load_trt: true                 # hardware-accelerate the synthesis stage
+    output_gain_db: 3.0
+    output_speed: 1.0
+    temperature: 0.5               # lower = more measured, stable prosody
+    sampling_seed: 1337            # fixed seed for run-to-run voice stability
+
+# Persona adapters — one production LoRA, swapped/rolled back by key.
+adapters:
+  enabled: true
+  base_dir: "adapters/"
+  training_defaults: { lora_rank: 32, lora_alpha: 64 }
+  profiles: { persona: "path/to/persona-adapter" }
+
+features:
+  pre_generation: { enabled: false }
+  sentence_streaming: { enabled: false }  # synth sentence N while the LLM writes N+1
+
+# Memory + cognition subsystems.
+mind:
+  recall_hybrid: true              # exact rare-term hits floor relevance above embedding cosine
+  embeddings: { enabled: true, model: "<CPU_EMBEDDING_MODEL>" }
+  dreams:  { enabled: true }       # on waking, recombine the real day into a short dream
+  journal: { llm_voice: true }     # nightly diary rewrite in her own voice
+
+world:
+  events: { enabled: true }        # environmental happenings feed the endocrine/emotion link
+
+cognition:
+  enabled: true
+  runtime_context_enabled: true
+  proactive:                       # autonomy: eligibility + cooldown drive self-initiated action
+    enabled: true
+    base_drive: 0.35
+    eligibility_threshold: 0.62
+    min_interval_s: 600
+    max_interval_s: 3600
+
+memory:
+  data_dir: "data/memory/"
+  max_recent_turns: 8
+  max_core_facts: 20
+  # non-owner relationship rises +1 only every N successful messages (anti rank-rush)
+  relationship_score_step_messages: 30
+  mention_bridge_enabled: true     # mentioning another user allows light cross-user recall
+
+streaming:
+  watch:                           # she watches a window and commentates (addressed speech only)
+    tick_seconds: 8
+    cooldown_seconds: 25           # anti-yapper: min gap between voluntary remarks
+    idle_after_seconds: 45         # long static screen = one honest "AFK" event, no hallucination
+
+singing:
+  enabled: true                    # fully headless song-cover pipeline in her voice
+  vram_swap_enabled: true          # free VRAM for the singing model, reload after
+  rate_limits:                     # tiered daily caps
+    everyone_per_day: 5
+    subscriber_per_day: 25
+    subscriber_role: "<SUBSCRIBER_ROLE>"
+
+# Hard output filter — these tokens indicate training leakage / injection; kill on sight.
+guillotine:
+  forbidden_tokens: ["Assistant:", "User:", "System:", "<|im_start|>", "<think>"]
+
+sleep:
+  vram_offload: true               # unload her voice while she sleeps, reload on waking

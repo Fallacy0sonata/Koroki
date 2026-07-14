@@ -1,0 +1,10 @@
+{
+  "stage": "grpo_8b_c512",
+  "gpu": "NVIDIA GeForce RTX 3090",
+  "ts": "2026-07-07 11:18:16",
+  "max_completion": 512,
+  "error": null,
+  "train_4steps_s": 222.6,
+  "peak_vram_torch_mib": 11710,
+  "peak_vram_smi_mib": 13283
+}

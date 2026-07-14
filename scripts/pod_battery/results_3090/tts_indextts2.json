@@ -1,0 +1,30 @@
+{
+  "stage": "tts_indextts2",
+  "gpu": "NVIDIA GeForce RTX 3090",
+  "ts": "2026-07-07 11:12:06",
+  "model_dir": "/workspace/models/IndexTTS-2",
+  "error": null,
+  "reference": "/workspace/sample_speech.wav",
+  "accel": false,
+  "load_s": 32.7,
+  "vram_loaded_mib": 9681,
+  "warmup": {
+    "synth_s": 11.67,
+    "audio_s": 8.82,
+    "rtf": 1.32
+  },
+  "runs": [
+    {
+      "synth_s": 9.15,
+      "audio_s": 9.58,
+      "rtf": 0.95
+    },
+    {
+      "synth_s": 8.34,
+      "audio_s": 8.46,
+      "rtf": 0.99
+    }
+  ],
+  "rtf_avg": 0.97,
+  "vram_peak_mib": 9935
+}

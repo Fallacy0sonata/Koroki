@@ -187,10 +187,12 @@ class Journal:
             url = settings["services"]["brain"]["url"] + "/v1/generate"
             payload = {
                 "request_id": f"journal_voice_{day}",
+                # Belt for the brain's 6000-char message cap (raised from 2000 —
+                # the full day template overflowed it and 422'd every night).
                 "message": (
                     "[internal] Below is the factual log of your day. Rewrite it as YOUR "
                     "diary entry — first person, your voice, keep every fact, keep it under "
-                    "150 words, no headings, no preamble.\n\n" + template_entry
+                    "150 words, no headings, no preamble.\n\n" + template_entry[:5500]
                 ),
                 "user_context": {
                     "user_id": "__journal_voice__",
@@ -214,7 +216,9 @@ class Journal:
                 f"# {day} — in her words\n\n{text}\n", encoding="utf-8")
             logger.info("journal: voiced %s", day)
         except Exception as exc:
-            logger.info("journal voicing skipped for %s (%s)", day, exc)
+            # WARNING, not info — an INFO-level skip hid a nightly 422 for days
+            # (same lesson as the heartbeat: failure signals must be visible).
+            logger.warning("journal voicing skipped for %s (%s)", day, exc)
 
     def _build_day_entry(self, day: str, events: list[dict]) -> str:
         if not events:

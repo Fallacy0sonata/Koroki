@@ -52,16 +52,24 @@ EGO_NEURON_TARGETS = OWNER_DAMPENING_TARGETS
 try:
     torch = importlib.import_module("torch")
     transformers_mod = importlib.import_module("transformers")
-    peft_mod = importlib.import_module("peft")
 
     AutoModelForCausalLM = transformers_mod.AutoModelForCausalLM
     AutoTokenizer = transformers_mod.AutoTokenizer
     BitsAndBytesConfig = transformers_mod.BitsAndBytesConfig
-    PeftModel = peft_mod.PeftModel
     HAS_ML = True
 except Exception:
     logger.warning("ML libraries not available — brain will run in stub mode")
     HAS_ML = False
+
+# peft is only needed by the transformers engine; .venv_brain2 (exllamav2 engine)
+# doesn't ship it, and its absence must not force stub mode there.
+try:
+    peft_mod = importlib.import_module("peft")
+    PeftModel = peft_mod.PeftModel
+    HAS_PEFT = True
+except Exception:
+    PeftModel = None
+    HAS_PEFT = False
 
 
 class AdapterManager:
@@ -75,6 +83,9 @@ class AdapterManager:
         self._runtime_model_name: str | None = None
         self._runtime_model_profile: str | None = None
         self._ollama_model_name: str | None = None
+        # OPT-O1: exllamav2 engine (services/brain/engine_exl2.py). Non-None only
+        # when models.brain.engine == "exllamav2" (requires .venv_brain2).
+        self._exl2_engine = None
         # Track 2: prefix cache — pre-filled KV state for the static persona prompt.
         # Populated by _prepare_prefix_cache() after model load.
         self._prefix_cache = None
@@ -118,6 +129,14 @@ class AdapterManager:
             return
 
         model_cfg = self._settings["models"]["brain"]
+
+        engine = os.environ.get("BRAIN_ENGINE", "").strip().lower() or str(
+            model_cfg.get("engine", "transformers")
+        ).strip().lower()
+        if engine == "exllamav2":
+            self._load_exl2(model_cfg)
+            return
+
         adapter_cfg = self._settings["adapters"]
         adapters_enabled = bool(adapter_cfg.get("enabled", True))
         model_name, resolved_profile = self._resolve_model_name(model_cfg)
@@ -180,10 +199,13 @@ class AdapterManager:
         load_kwargs["local_files_only"] = True
         base_model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
 
-        if not adapters_enabled:
+        if not adapters_enabled or not HAS_PEFT:
             self._model = base_model
             self._model.eval()
-            logger.info("Adapter loading disabled by config; running base model only")
+            if adapters_enabled and not HAS_PEFT:
+                logger.warning("peft not installed — running base model only")
+            else:
+                logger.info("Adapter loading disabled by config; running base model only")
             return
 
         # --- Load all adapters at startup ---
@@ -233,6 +255,68 @@ class AdapterManager:
         # Track 2: pre-fill KV cache for the static persona prefix.
         # Saves ~70-80ms of prefill compute per request. Non-fatal if it fails.
         self._prepare_prefix_cache()
+
+    def _load_exl2(self, model_cfg: dict) -> None:
+        """OPT-O1 engine path: EXL2 quant via exllamav2 in .venv_brain2.
+
+        The HF tokenizer still loads (from the EXL2 model dir — the quant repos
+        ship the full tokenizer) because prompt_builder needs apply_chat_template
+        and app.py counts prompt tokens with it. Only generation moves engines.
+        """
+        exl2_cfg = model_cfg.get("exl2", {}) or {}
+        profile = os.environ.get("BRAIN_MODEL_PROFILE", "").strip() or str(
+            model_cfg.get("model_profile", "production")
+        )
+        profiles = exl2_cfg.get("model_profiles", {}) or {}
+        model_dir = str(profiles.get(profile, "")).strip() or str(
+            exl2_cfg.get("model_dir", "")
+        ).strip()
+        if not model_dir:
+            raise ValueError("models.brain.exl2.model_dir is empty (engine=exllamav2)")
+
+        _repo_root = Path(__file__).resolve().parents[2]
+        model_path = Path(model_dir)
+        if not model_path.is_absolute():
+            model_path = _repo_root / model_dir
+        if not model_path.exists():
+            raise FileNotFoundError(f"EXL2 model dir not found: {model_path}")
+
+        self._runtime_model_name = str(model_path)
+        self._runtime_model_profile = f"{profile} (exllamav2)"
+        logger.info("Brain engine: exllamav2 — model=%s profile=%s", model_path, profile)
+
+        logger.info("Loading HF tokenizer from EXL2 dir: %s", model_path)
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            str(model_path), local_files_only=True
+        )
+
+        try:
+            from .engine_exl2 import ExLlamaV2Engine
+        except ImportError as exc:
+            raise RuntimeError(
+                "engine=exllamav2 but exllamav2 is not importable — the brain must "
+                "run in .venv_brain2 for this engine (launcher/supervisor pick the "
+                "venv from models.brain.engine)"
+            ) from exc
+
+        lora_dir = str(exl2_cfg.get("lora_dir", "")).strip() or None
+        lora_name = str(exl2_cfg.get("lora_name", "koroki_4b")).strip() or "koroki_4b"
+        if lora_dir:
+            lora_path = Path(lora_dir)
+            if not lora_path.is_absolute():
+                lora_dir = str(_repo_root / lora_dir)
+
+        engine = ExLlamaV2Engine(
+            model_dir=str(model_path),
+            lora_dir=lora_dir,
+            lora_name=lora_name,
+            max_seq_len=int(exl2_cfg.get("max_seq_len", 3072)),
+        )
+        engine.load()
+        self._exl2_engine = engine
+        if engine.lora_attached:
+            self._adapter_names.append(lora_name)
+        logger.info("Brain ready (exllamav2). Adapters: %s", self._adapter_names)
 
     def _prepare_prefix_cache(self) -> None:
         """Pre-compute KV cache for the static system-prompt prefix.
@@ -307,6 +391,11 @@ class AdapterManager:
         CRITICAL: This operation is O(1) and does NOT move adapters to/from CPU.
         It simply changes which adapter's weights are used in the forward pass.
         """
+        if self._exl2_engine is not None:
+            # exl2 keeps its single LoRA permanently attached (detach is bugged
+            # in exllamav2 0.3.2 anyway — see engine_exl2.py docstring).
+            self._current_adapter = adapter_name
+            return
         if self._model is None or not hasattr(self._model, "set_adapter"):
             return
         if not self._adapter_names or adapter_name == "base":
@@ -351,9 +440,16 @@ class AdapterManager:
     def is_ready(self) -> bool:
         if self._ollama_model_name:
             return True
+        if self._exl2_engine is not None:
+            return self._exl2_engine.is_loaded and self._tokenizer is not None
         if not HAS_ML:
             return False
         return self._model is not None and self._tokenizer is not None
+
+    @property
+    def exl2_engine(self):
+        """Non-None when the exllamav2 engine is active (OPT-O1)."""
+        return self._exl2_engine
 
     @property
     def ollama_model_name(self) -> str | None:

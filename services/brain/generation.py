@@ -187,6 +187,66 @@ async def stream_tokens(
         )
         return
 
+    # OPT-O1: exllamav2 engine path (.venv_brain2). Same thread+queue shape as
+    # the transformers path below; sampling params computed above apply as-is.
+    # anti_terms ride the dynamic generator's banned_strings (string-level ban
+    # with rewind — strictly better than bad_words_ids).
+    exl2 = getattr(adapter_manager, "exl2_engine", None)
+    if exl2 is not None and exl2.is_loaded:
+        rid = request_id or "brain_exl2"
+        loop = asyncio.get_event_loop()
+        token_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        gen_started = loop.time()
+
+        def _generate_exl2() -> None:
+            try:
+                for chunk in exl2.generate_stream(
+                    prompt,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
+                    do_sample=do_sample,
+                    banned_strings=[t for t in anti_terms if t],
+                ):
+                    loop.call_soon_threadsafe(token_queue.put_nowait, chunk)
+            except Exception as exc:
+                logger.error("[%s] EXL2 generation thread error: %s", rid, exc)
+            finally:
+                loop.call_soon_threadsafe(token_queue.put_nowait, None)
+
+        threading.Thread(target=_generate_exl2, daemon=True).start()
+
+        first_token_ms: float | None = None
+        last_token_time: float | None = None
+        token_chunks = 0
+        try:
+            while True:
+                token = await token_queue.get()
+                if token is None:
+                    break
+                now = loop.time()
+                if first_token_ms is None:
+                    first_token_ms = round((now - gen_started) * 1000.0, 1)
+                last_token_time = now
+                token_chunks += 1
+                yield token
+        finally:
+            total_gen_ms = round((loop.time() - gen_started) * 1000.0, 1)
+            tpot_ms: float | None = None
+            if first_token_ms is not None and token_chunks > 1 and last_token_time is not None:
+                after_first_ms = (last_token_time - gen_started) * 1000.0 - first_token_ms
+                tpot_ms = round(after_first_ms / max(token_chunks - 1, 1), 1)
+            logger.info(
+                "[%s] Brain EXL2 generation: ttft_ms=%s token_chunks=%d tpot_ms=%s total_gen_ms=%s",
+                rid,
+                first_token_ms,
+                token_chunks,
+                tpot_ms,
+                total_gen_ms,
+            )
+        return
+
     # Stub path — no model loaded
     if not HAS_ML or adapter_manager.model is None:
         logger.warning("Brain stub mode: yielding canned response")

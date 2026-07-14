@@ -66,9 +66,21 @@ class EmbeddingModel:
 
                 cfg = get_settings().get("mind", {}).get("embeddings", {})
                 name = str(cfg.get("model", _DEFAULT_MODEL))
-                logger.info("loading embedding model %s (cpu)...", name)
-                self._tok = AutoTokenizer.from_pretrained(name)
-                self._model = AutoModel.from_pretrained(name).to("cpu").eval()
+                # Resolve hub id -> local snapshot dir first (same pattern as
+                # brain adapters.py). Loading by DIRECTORY bypasses hub file
+                # probes that raise OfflineModeIsEnabled under HF_HUB_OFFLINE=1
+                # (in .env) even with a complete cache — which silently degraded
+                # recall to text-overlap on every normal boot until 2026-07-05.
+                path = name
+                try:
+                    from huggingface_hub import snapshot_download
+
+                    path = snapshot_download(name, local_files_only=True)
+                except Exception:
+                    logger.info("embedding model not in local HF cache — trying hub")
+                logger.info("loading embedding model %s (cpu) from %s ...", name, path)
+                self._tok = AutoTokenizer.from_pretrained(path)
+                self._model = AutoModel.from_pretrained(path).to("cpu").eval()
                 logger.info("embedding model ready")
                 return True
             except Exception as exc:

@@ -171,6 +171,56 @@ def _relevance_text_overlap(query: str, memory_content: str) -> float:
     return intersection / union if union else 0.0
 
 
+# Exact-term recall layer (2026-07-06, research-arc verdict adapted):
+# cosine on small embedders misses arbitrary exact nouns — gamer tags, JP slang,
+# entity names ("cockatiel"-class tokens). Gemini proposed SQLite FTS5/BM25; our
+# nodes live in RAM, so the same idea lands as an in-process exact-term pass
+# blended into relevance. Any rare-token exact hit floors relevance above the
+# 0.30 injection threshold, so a name always recalls even when the latent space
+# shrugs. Stopwords keep "the/and/you" from flooring everything.
+_EXACT_STOPWORDS = frozenset(
+    "the and for you your are was were with that this have has had not but they "
+    "them then than what when where which while about would could should there "
+    "here just like some more most very much many also into onto over under "
+    "she her him his its our their who whom how why did does doing done been "
+    "being can will won may might must shall let say said says tell told talk "
+    "know knew think thought want wanted going gonna kinda okay yeah yes nah "
+    "still even only ever never always maybe really actually right now today "
+    "tomorrow yesterday tonight thing things stuff wait dont cant didnt isnt".split()
+)
+
+
+def _exact_term_relevance(query: str, memory_content: str) -> float:
+    """0 if no exact rare-term hit; else 0.55..1.0 by fraction of terms hit."""
+    if not query or not memory_content:
+        return 0.0
+    q_terms = {
+        w
+        for w in re.findall(r"[a-z0-9][a-z0-9_'$#@-]{2,}", query.lower())
+        if w not in _EXACT_STOPWORDS
+    }
+    # CJK has no word boundaries and runs include particles — match character
+    # TRIGRAMS from each run (bigram only when the whole run is 2 chars).
+    cjk_grams: set[str] = set()
+    for run in re.findall(r"[぀-ヿ一-鿿]{2,}", query):
+        if len(run) == 2:
+            cjk_grams.add(run)
+        else:
+            cjk_grams.update(run[i : i + 3] for i in range(len(run) - 2))
+    if not q_terms and not cjk_grams:
+        return 0.0
+    content_low = memory_content.lower()
+    hits = sum(1 for t in q_terms if t in content_low)
+    gram_hits = sum(1 for g in cjk_grams if g in memory_content)
+    if hits == 0 and gram_hits == 0:
+        return 0.0
+    # Latin terms and CJK grams score on their own fractions, then combine.
+    frac_terms = hits / len(q_terms) if q_terms else 0.0
+    frac_grams = gram_hits / len(cjk_grams) if cjk_grams else 0.0
+    frac = max(frac_terms, frac_grams)
+    return min(1.0, 0.55 + 0.45 * frac)
+
+
 def _recency_score(age_seconds: float) -> float:
     """exp-decay recency. Half-life = RECENCY_DECAY_HOURS hours."""
     age_hours = age_seconds / 3600.0
@@ -222,6 +272,14 @@ class MemoryStream:
         self._stream_path = stream_path or _STREAM_PATH
         self._vectors_path = vectors_path or _VECTORS_PATH
         self._vectors: dict[str, list[float]] = {}
+        try:
+            from shared.utils.config import get_settings
+
+            self._hybrid_recall = bool(
+                get_settings().get("mind", {}).get("recall_hybrid", True)
+            )
+        except Exception:
+            self._hybrid_recall = True
         self._load()
         self._load_vectors()
         # backfill vectors for pre-embedding nodes in the background (never blocks startup)
@@ -419,6 +477,12 @@ class MemoryStream:
                     relevance = max(0.0, min(1.0, (cos - self._COS_LO) / (self._COS_HI - self._COS_LO)))
                 else:
                     relevance = _relevance_text_overlap(query, node.content)
+                # Hybrid layer: exact rare-term hits floor relevance so names
+                # and JP terms recall even when cosine misses them.
+                if self._hybrid_recall:
+                    exact = _exact_term_relevance(query, node.content)
+                    if exact > relevance:
+                        relevance = exact
                 score = (
                     ALPHA_RECENCY * recency
                     + BETA_IMPORTANCE * importance

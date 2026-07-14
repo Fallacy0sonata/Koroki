@@ -1,6 +1,7 @@
 # ── Secrets ──────────────────────────────────────────────
 .env
 *.env.local
+.mcp.json
 
 # ── Virtual environments (NEVER track — the 44 GB .git lesson, 2026-07-04) ──
 .venv/
@@ -19,6 +20,7 @@ __pycache__/
 # ── Local tools & model stores (not Koroki source) ───────
 tools/ComfyUI/
 tools/models/
+tools/mediamtx/
 ApplioV3.6.2/
 stockfish-windows-x86-64-avx2/
 checkpoints/
@@ -56,7 +58,50 @@ assets/
 *.mp4
 *.webm
 
+# ── Private side project (lives in Koroki Storage; local dev copy untracked) ──
+experiments/wavebench/
+
 # ── Session litter ───────────────────────────────────────
 .claude/worktrees/
 .cache/
 *.log
+
+# ── Portfolio: keep the AI-assisted workflow + internal architecture notes ──
+# ── OUT of the shared repo (they stay local; the repo shows the engineering) ──
+.claude/
+CLAUDE.md
+LEGACY.md
+# live config reveals exact models/recipes — ship settings.example.yaml instead
+config/settings.yaml
+auto.key
+auto.crt
+docs/master_queue.md
+docs/claude_handbook.md
+docs/vibecoding_upgrades.md
+docs/*prediction_log.md
+docs/brain_split_design.md
+docs/game_limbs_verdict_*.md
+docs/game_mind_2_design.md
+docs/minecraft_mind_design.md
+docs/minecraft_research_brief.md
+docs/minecraft_research_dispatch.md
+docs/minecraft_backlog.md
+docs/minecraft_verification_plan.md
+docs/minecraft_player_gap_analysis.md
+docs/game_limbs_verdict.md
+docs/research_*.md
+docs/koroki_presentation*.md
+docs/frontend_compositor_verdict.md
+docs/koroki_optimization_context.md
+docs/koroki_subsystem_atlas.md
+docs/koroki_map.md
+docs/autonomous_koroki_design.md
+docs/known_good_stacks.md
+docs/environment_matrix.md
+docs/checkpoint_manifest.md
+docs/live_test_checklist.md
+docs/local_image_gen_setup.md
+AGENT_ARCHITECTURE.md
+docs/project_brief.md
+docs/README.md
+docs/architecture_map.md

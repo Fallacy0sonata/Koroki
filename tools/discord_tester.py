@@ -1,5 +1,5 @@
 """
-Claude tester — sends/reads Discord messages as a second bot account.
+Automated tester — sends/reads Discord messages as a second bot account.
 
 Requires TESTER_BOT_TOKEN in .env (separate bot from Koroki).
 Steps to set up:

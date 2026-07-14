@@ -2,7 +2,7 @@
 World clock with circadian forcing functions.
 
 Phase 1 — Endocrine MVP needs:
-  - UTC+7 wall clock (her timezone per CLAUDE.md / autonomous_koroki_design.md)
+  - UTC+7 wall clock (her timezone per the design docs)
   - Circadian forcing for cortisol (morning peak, midnight nadir)
   - Melatonin window (evening rise → midnight peak → morning offset)
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timedelta, timezone
 
-# Koroki's timezone — per autonomous_koroki_design.md, real-time UTC+7.
+# Koroki's timezone — per the design docs, real-time UTC+7.
 _KOROKI_TZ = timezone(timedelta(hours=7))
 
 

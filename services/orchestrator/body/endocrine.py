@@ -908,6 +908,17 @@ class EndocrineEngine:
                 except Exception as exc:
                     logger.warning("Receptor tick failed for %s: %s", comp.name, exc)
 
+        # Throttled persistence (energy.py precedent): save/load existed since
+        # Phase 1 but NOTHING called save() — every restart reset her hormones
+        # to baseline (why melatonin had to re-climb after each deploy).
+        self._maybe_save()
+
+    def _maybe_save(self, min_interval_s: float = 60.0) -> None:
+        now_ts = time.time()
+        if now_ts - getattr(self, "_last_save_ts", 0.0) >= min_interval_s:
+            self._last_save_ts = now_ts
+            self.save()
+
     # ------------------------------------------------------------------
     # Snapshot for downstream consumers (interoception)
     # ------------------------------------------------------------------

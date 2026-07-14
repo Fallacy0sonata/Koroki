@@ -1,7 +1,7 @@
 """
 Room identity — Koroki's canonical room aesthetic.
 
-Per CLAUDE.md and autonomous_koroki_design.md, the room is her situated existence:
+Per the design docs, the room is her situated existence:
 purple-tinted dim lighting, soft surfaces, late-night-coded feel. The room IS her
 identity-place.
 

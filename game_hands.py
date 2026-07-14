@@ -36,7 +36,40 @@ PANIC_FILE = _REPO_ROOT / "data" / "game" / "PANIC"
 # The whole vocabulary. The captain picks a type; everything else is data.
 # "hold" = press-and-hold a key for N seconds — the movement primitive
 # (third-person games: hold w to run to the mailbox; owner design 2026-07-04).
-ACTION_TYPES = {"click", "double_click", "right_click", "move_to", "press", "hold", "scroll", "wait"}
+ACTION_TYPES = {"click", "double_click", "right_click", "move_to", "press", "hold",
+                "hold_click", "scroll", "wait"}
+
+# REAL-MONEY / OFF-GAME RAIL (2026-07-05): she pursued her "buy stuff" goal
+# straight into Universal Paperclips' MERCH link ("T-Shirts: Gift Shop") —
+# real-world commerce read as gameplay. Two tiers (owner insight: business
+# games legitimately contain "checkout"/"gift shop"/"subscribe" — words alone
+# would cripple her in every tycoon):
+#   HARD BLOCK — unambiguous real-world payment surfaces. No game needs her
+#                clicking these; refused outright, panic-switch tier.
+#   VERIFY     — commerce-flavored terms that MIGHT be gameplay. Her eyes get
+#                asked, with the actual frame: would this cost real money /
+#                leave the game? Only a clear "no" lets the click through.
+#                Vision unavailable -> refuse (fail safe).
+HARD_BLOCK_TERMS = (
+    "paypal", "credit card", "debit card", "patreon", "kickstarter",
+    "gift card", "redeem code", "enter code", "billing",
+)
+VERIFY_TERMS = (
+    "gift shop", "t-shirt", "tshirt", "merch", "donate", "checkout",
+    "add to cart", "app store", "google play", "steam store", "buy now",
+    "subscribe", "premium", "robux", "top up", "top-up", "iphone", "android",
+    "shop now", "official site", "www.", ".com",
+)
+
+
+def classify_commerce_risk(target: str) -> str:
+    """'block' | 'verify' | 'clear' for a click/move target."""
+    t = " ".join(str(target or "").lower().split())
+    if any(term in t for term in HARD_BLOCK_TERMS):
+        return "block"
+    if any(term in t for term in VERIFY_TERMS):
+        return "verify"
+    return "clear"
 
 VK_F9 = 0x78
 
@@ -124,6 +157,87 @@ class GameHands:
 
     # ── target resolution ────────────────────────────────────────────
 
+    async def _vision_money_check(self, target: str) -> bool:
+        """Ask her eyes, with the actual frame, whether clicking `target` is safe.
+
+        Returns True only on a clear 'no' (it will NOT cost real money / leave
+        the game). Any 'yes', 'unsure', or vision failure refuses — fail safe.
+        """
+        from stream_watch import capture_window_png
+
+        if self._window_rect(require_foreground=False) is None:
+            return False
+        png = await asyncio.to_thread(capture_window_png, self._hwnd)
+        if png is None:
+            return False
+        question = (
+            f"If someone clicked '{target}' on this screen, would it lead to a "
+            "real-money purchase, real merchandise, or a website outside this "
+            "game? Answer with only one word: yes, no, or unsure."
+        )
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=3.0, read=45.0, write=15.0, pool=5.0)
+            ) as client:
+                resp = await client.post(f"{self.vision_url}/v1/describe", json={
+                    "request_id": "money_check",
+                    "images_b64": [base64.b64encode(png).decode("ascii")],
+                    "question": question,
+                    "max_tokens": 8,
+                })
+                if resp.status_code != 200:
+                    return False
+                answer = str(resp.json().get("description") or "").strip().lower()
+        except httpx.HTTPError:
+            return False
+        first = (answer.split() or [""])[0].strip(".,!")
+        return first == "no"
+
+    async def _landing_text(self, pos: tuple[int, int]) -> Optional[str]:
+        """Read what's at the click point: crop around it, ask her eyes.
+
+        Returns the text/label under the crosshair, or None if unreadable
+        (None = proceed; the words-tier rail already ran)."""
+        from stream_watch import capture_window_png
+
+        rect = self._window_rect(require_foreground=False)
+        if rect is None or self._hwnd is None:
+            return None
+        png = await asyncio.to_thread(capture_window_png, self._hwnd)
+        if png is None:
+            return None
+        try:
+            import io
+            from PIL import Image
+            img = Image.open(io.BytesIO(png))
+            # pos is screen coords; crop is window-relative.
+            x = pos[0] - rect[0]
+            y = pos[1] - rect[1]
+            box = (max(0, x - 140), max(0, y - 45),
+                   min(img.width, x + 140), min(img.height, y + 45))
+            crop = img.crop(box)
+            buf = io.BytesIO()
+            crop.save(buf, format="PNG")
+            crop_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        except Exception:
+            return None
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=3.0, read=45.0, write=15.0, pool=5.0)
+            ) as client:
+                resp = await client.post(f"{self.vision_url}/v1/describe", json={
+                    "request_id": "landing_check",
+                    "images_b64": [crop_b64],
+                    "question": "What does the button or link text in this image say? "
+                                "Answer with just the text.",
+                    "max_tokens": 20,
+                })
+                if resp.status_code != 200:
+                    return None
+                return str(resp.json().get("description") or "").strip() or None
+        except httpx.HTTPError:
+            return None
+
     async def resolve_target(self, target: str) -> Optional[tuple[int, int]]:
         """Described thing → screen pixel via capture + vision point."""
         from stream_watch import capture_window_png
@@ -171,6 +285,24 @@ class GameHands:
             self.stats.refused += 1
             logger.warning("PANIC active — hands frozen (action dropped: %s)", kind)
             return {"ok": False, "detail": "panic switch active"}
+
+        # Real-money / off-game rail — before any pointing or clicking.
+        target = str(action.get("target", ""))
+        if kind in ("click", "double_click", "right_click", "move_to", "hold_click"):
+            risk = classify_commerce_risk(target)
+            if risk == "block":
+                self.stats.refused += 1
+                logger.warning("REAL-MONEY RAIL: hard-refused %s on %r", kind, target[:60])
+                return {"ok": False, "detail": f"refused: {target[:40]!r} is a real-world "
+                                               "payment surface — never part of play"}
+            if risk == "verify":
+                safe = await self._vision_money_check(target)
+                if not safe:
+                    self.stats.refused += 1
+                    logger.warning("REAL-MONEY RAIL: vision-refused %s on %r", kind, target[:60])
+                    return {"ok": False, "detail": f"refused: {target[:40]!r} looks like real "
+                                                   "commerce or an off-game link on this screen"}
+                logger.info("REAL-MONEY RAIL: vision cleared %r as in-game", target[:60])
 
         gap = time.time() - self._last_action_ts
         if gap < self.min_action_gap_s:
@@ -226,11 +358,31 @@ class GameHands:
         if pos is None:
             self.stats.refused += 1
             return {"ok": False, "detail": f"couldn't locate {target!r} (or window lost)"}
+
+        # LANDING-ZONE RAIL (2026-07-05, merch click #2): she said "click the
+        # store" — clean words — but pointing landed on the bright MERCH banner
+        # (salience bias). Words are checked above; here we read what's actually
+        # under the crosshair and re-classify. Only real clicks pay this tax.
+        if kind in ("click", "double_click", "hold_click") and not self.dry_run:
+            landing = await self._landing_text(pos)
+            if landing:
+                l_risk = classify_commerce_risk(landing)
+                if l_risk == "block" or (
+                    l_risk == "verify" and not await self._vision_money_check(landing)
+                ):
+                    self.stats.refused += 1
+                    logger.warning("LANDING RAIL: refused %s at %s — under cursor: %r",
+                                   kind, pos, landing[:60])
+                    return {"ok": False, "detail": f"refused: the spot found for "
+                                                   f"{target[:30]!r} is {landing[:40]!r} — "
+                                                   "real commerce/off-game, not clicking it"}
         # REAL input additionally requires the game to be the foreground window.
         if not self.dry_run and self._window_rect(require_foreground=True) is None:
             self.stats.refused += 1
             return {"ok": False, "detail": "window not foreground — real input refused"}
         x, y = pos
+
+        hold_secs = min(6.0, max(0.2, float(action.get("seconds", 1.5))))
 
         def _mouse(pdi):
             if kind == "move_to":
@@ -239,10 +391,24 @@ class GameHands:
                 pdi.doubleClick(x, y)
             elif kind == "right_click":
                 pdi.rightClick(x, y)
+            elif kind == "hold_click":
+                # GM2 wave 2: held mouse button on a target ("hold the pump
+                # handle for 3 seconds"). Symmetric to key-hold — never leave
+                # the button stuck down.
+                import time as _t
+
+                pdi.moveTo(x, y)
+                pdi.mouseDown(x, y)
+                try:
+                    _t.sleep(hold_secs)
+                finally:
+                    pdi.mouseUp(x, y)
             else:
                 pdi.click(x, y)
 
-        return await self._do(kind, f"{kind} {target!r} @ ({x},{y})", _mouse)
+        _detail = (f"{kind} {target!r} {hold_secs:.1f}s @ ({x},{y})"
+                   if kind == "hold_click" else f"{kind} {target!r} @ ({x},{y})")
+        return await self._do(kind, _detail, _mouse)
 
     async def _do(self, kind: str, detail: str, fn) -> dict:
         if self.dry_run:

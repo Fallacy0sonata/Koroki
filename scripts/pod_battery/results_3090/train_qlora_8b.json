@@ -1,0 +1,13 @@
+{
+  "stage": "train_qlora_8b",
+  "gpu": "NVIDIA GeForce RTX 3090",
+  "ts": "2026-07-07 11:06:57",
+  "model": "Qwen/Qwen3-8B",
+  "error": null,
+  "load_s": 30.4,
+  "s_per_step": 11.05,
+  "samples_per_step": 32,
+  "peak_vram_torch_mib": 10436,
+  "peak_vram_smi_mib": 10947,
+  "est_hours_2100x5ep": 1.01
+}

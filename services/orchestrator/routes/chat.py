@@ -1222,6 +1222,40 @@ async def chat(req: ChatRequest) -> dict:
 
     timing.mark("validate")
 
+    # === Sleep gate — asleep means not conscious, not "slow to answer" ===
+    # A stranger chatted with her for 18+ messages at 1:30 AM (2026-07-06) while her
+    # felt state said "deep stillness, not really here" — she answered every one,
+    # out of register. Asleep = no reply for non-owners (empty text; the bot posts
+    # nothing). The owner always gets through — waking her is his call, and the
+    # drowsy felt state already colors those replies. Memory/relationship state is
+    # untouched: conversations she never had must not leave traces.
+    if bool(settings.get("sleep", {}).get("gate_chat", True)) and not req.user_context.is_owner:
+        try:
+            from ..body.sleep import SleepState, get_sleep
+
+            _stage = get_sleep().current_state()
+            _sleep_gated = _stage in (SleepState.ASLEEP, SleepState.FALLING_ASLEEP)
+        except Exception:
+            _stage = None
+            _sleep_gated = False
+        if _sleep_gated:
+            logger.info(
+                "[%s] Sleep gate: %s while %s — no reply",
+                req.request_id,
+                req.user_context.user_id,
+                _stage.value,
+            )
+            return {
+                "request_id": req.request_id,
+                "text": "",
+                "adapter_used": "asleep",
+                "audio_path": None,
+                "has_audio": False,
+                "tts_deferred": False,
+                "tts_request": None,
+                "asleep": True,
+            }
+
     # === Sight — her eyes look at attached images before anything reads the message ===
     # The vision service (moondream2, :9005) turns the image into a text percept.
     # Fail-soft: if her eyes are offline she is told an image exists that she
@@ -1988,7 +2022,11 @@ async def chat(req: ChatRequest) -> dict:
                 "relationship_score": _ss_rel_score,
                 "emotion": emotional_state.current_emotion,
                 "emotion_intensity": emotional_state.intensity,
-                "emotion_variant": emotion_hints.suggested_variant,
+                "emotion_variant": (
+                    "conversational"
+                    if bool(settings.get("tts", {}).get("conversational_delivery", False))
+                    else emotion_hints.suggested_variant
+                ),
                 "emo_vector": _ss_emo_vector,
             }
             try:
@@ -2379,13 +2417,18 @@ async def chat(req: ChatRequest) -> dict:
             emotion_intensity=emotional_state.intensity,
             relationship_score=rel_score,
         )
+        # Owner A/B (2026-07-05, identical text): conversational delivery beat
+        # plain. Flag-gated for her production voice — flip tts.conversational_
+        # delivery in settings.yaml; his ears decide over live days.
+        _conv_delivery = bool(settings.get("tts", {}).get("conversational_delivery", False))
         tts_request_payload = {
             "request_id": req.request_id,
             "text": clipped_speech,
             "relationship_score": rel_score,
             "emotion": emotional_state.current_emotion,
             "emotion_intensity": emotional_state.intensity,
-            "emotion_variant": emotion_hints.suggested_variant,
+            "emotion_variant": ("conversational" if _conv_delivery
+                                else emotion_hints.suggested_variant),
             "emo_vector": emo_vector,
         }
         if req.defer_tts:

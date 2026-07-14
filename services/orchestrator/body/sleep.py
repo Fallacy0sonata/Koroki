@@ -97,6 +97,18 @@ WAKE_FROM_REFILL_ENERGY = 0.85  # above this, she naturally wakes
 # Melatonin thresholds (driven by world clock).
 SLEEP_INITIATION_MELATONIN = 0.7  # high melatonin pulls toward sleep
 WAKE_MELATONIN_CEILING = 0.2       # low melatonin in morning helps wake
+# Night gate for the energy-refill wake (first live night, 2026-07-05): she
+# refilled to 0.85 by 2 AM, woke, and high melatonin (0.67) immediately pulled
+# her back down — WAKE↔FALLING_ASLEEP flapping until ~4:30, wake callbacks
+# firing mid-night (a dream logged at 02:15). A body full of energy at 2 AM
+# keeps sleeping; refill only wakes her when melatonin says it isn't night.
+# Daytime naps unaffected (midday melatonin ≈ 0).
+WAKE_REFILL_MELATONIN_CEILING = 0.45
+# Hysteresis: once fully awake, don't slide back into FALLING_ASLEEP within
+# this window unless energy is critically gone — kills residual flip-flopping
+# at threshold boundaries (same night: sleeping→reading→sleeping every 2 min).
+MIN_WAKE_DWELL_SECONDS = 15 * 60
+CRITICAL_ENERGY = 0.15  # below this she can drop off regardless of dwell
 # BUT melatonin-wake only applies after she's been asleep long enough.
 # Otherwise "low melatonin" of daytime would prevent any nap — she'd wake
 # the instant ASLEEP began because mel is already 0 at noon.
@@ -106,6 +118,14 @@ MIN_SLEEP_FOR_MELATONIN_WAKE_SECONDS = 4 * 3600  # 4h — only substantial sleep
 # Sleep debt target. 24h - 8h sleep = 16h max wake.
 TARGET_WAKE_SECONDS = 16 * 3600  # 16h
 SLEEP_DEBT_CORTISOL_MULT_PER_HOUR = 0.05  # +5% cortisol baseline per hour of debt
+
+# Downtime is SUSPENSION, not wakefulness. A tick gap far beyond the 60s
+# heartbeat means the stack was off — that time must not count as sleepless
+# hours (live 2026-07-08: a day of services-off read as 20.5h sleep debt and
+# she collapsed asleep at boot, offloading her own voice mid-rehearsal).
+# Normal restarts (< this) still count, preserving the 2026-07-05 rule that
+# restarts must not silently reset debt.
+SUSPEND_GAP_SECONDS = 600.0
 
 
 @dataclass
@@ -133,6 +153,9 @@ class SleepSystem:
         # Notify listeners (set by sleep_cycle.py for consolidation hooks)
         self._on_sleep_callbacks: list = []
         self._on_wake_callbacks: list = []
+        # Fired at ASLEEP→WAKING (start of the 3-min morning fog) — early enough
+        # for the VRAM offloader to reload her voice before she can speak.
+        self._on_waking_callbacks: list = []
 
     # ------------------------------------------------------------------
     # State machine tick
@@ -144,6 +167,11 @@ class SleepSystem:
         with self._lock:
             dt = max(0.0, ts - self._state.last_tick_ts)
             self._state.last_tick_ts = ts
+            if dt > SUSPEND_GAP_SECONDS:
+                # Stack was down: shift the wake-ledger anchor past the gap and
+                # swallow the dt so energy doesn't drain a day in one tick.
+                self._state.last_full_sleep_ts += dt
+                dt = 0.0
 
         energy = get_energy()
         mel = melatonin_circadian()
@@ -169,8 +197,16 @@ class SleepSystem:
             cur_energy = energy.level()
 
             if state == SleepState.WAKE.value:
-                # Pull toward sleep if energy is low OR melatonin is high
-                if cur_energy < SLEEP_INITIATION_ENERGY or mel > SLEEP_INITIATION_MELATONIN:
+                # Pull toward sleep if energy is low OR melatonin is high —
+                # but a fresh wake holds for MIN_WAKE_DWELL (hysteresis) unless
+                # energy is critically gone.
+                wants_sleep = (
+                    cur_energy < SLEEP_INITIATION_ENERGY or mel > SLEEP_INITIATION_MELATONIN
+                )
+                dwell_ok = (
+                    in_state_for >= MIN_WAKE_DWELL_SECONDS or cur_energy < CRITICAL_ENERGY
+                )
+                if wants_sleep and dwell_ok:
                     self._transition_to(SleepState.FALLING_ASLEEP, ts)
 
             elif state == SleepState.FALLING_ASLEEP.value:
@@ -189,7 +225,13 @@ class SleepSystem:
                 slept_long_enough_for_morning_wake = (
                     in_state_for >= MIN_SLEEP_FOR_MELATONIN_WAKE_SECONDS
                 )
-                wake_from_refill = cur_energy >= WAKE_FROM_REFILL_ENERGY
+                # Refill-wake is gated on melatonin: full energy at 2 AM keeps
+                # sleeping (see WAKE_REFILL_MELATONIN_CEILING). Naps still end
+                # on refill because daytime melatonin ≈ 0.
+                wake_from_refill = (
+                    cur_energy >= WAKE_FROM_REFILL_ENERGY
+                    and mel < WAKE_REFILL_MELATONIN_CEILING
+                )
                 wake_from_morning = (
                     mel < WAKE_MELATONIN_CEILING and slept_long_enough_for_morning_wake
                 )
@@ -203,6 +245,13 @@ class SleepSystem:
                 # After duration, fully awake
                 if in_state_for >= WAKING_DURATION_SECONDS:
                     self._transition_to(SleepState.WAKE, ts)
+
+        # Throttled persistence — save() existed but was never called (energy.py
+        # precedent, fixed 2026-07-05): restarts silently reset sleep debt and
+        # state timing. Transitions also save immediately (see _transition_to).
+        if ts - getattr(self, "_last_save_ts", 0.0) >= 60.0:
+            self._last_save_ts = ts
+            self.save()
 
     def _transition_to(self, new_state: SleepState, ts: float) -> None:
         """Internal — must hold _lock."""
@@ -223,6 +272,18 @@ class SleepSystem:
                     cb()
                 except Exception as exc:
                     logger.warning("on_wake callback failed: %s", exc)
+        elif new_state == SleepState.WAKING:
+            for cb in self._on_waking_callbacks:
+                try:
+                    cb()
+                except Exception as exc:
+                    logger.warning("on_waking callback failed: %s", exc)
+        # State changes persist immediately — a restart mid-night must resume
+        # from the right state, not reset to WAKE.
+        try:
+            threading.Thread(target=self.save, daemon=True).start()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Public read API
@@ -293,6 +354,10 @@ class SleepSystem:
     def on_wake(self, callback) -> None:
         """Register a callback fired when she fully wakes (WAKING → WAKE)."""
         self._on_wake_callbacks.append(callback)
+
+    def on_waking(self, callback) -> None:
+        """Register a callback fired at ASLEEP → WAKING (morning fog begins)."""
+        self._on_waking_callbacks.append(callback)
 
     # ------------------------------------------------------------------
     # Felt-state contribution

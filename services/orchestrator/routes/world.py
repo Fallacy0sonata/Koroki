@@ -10,7 +10,7 @@ nothing exposed it all in one place (only `/v1/nervstate` existed).
 Two views in the response:
 - `felt` — natural-language descriptors (what the captain LLM reads / the frontend captions).
 - everything else (`room`, `body`, `presence`, numeric fields) — raw values for the FRONTEND
-  RENDERER to draw with. **These raw numbers are NOT for the LLM** (CLAUDE.md: the captain reads
+  RENDERER to draw with. **These raw numbers are NOT for the LLM** (the design docs: the captain reads
   sensations, not numbers).
 
 Read-only and defensive: each subsystem is wrapped so one failing getter degrades that

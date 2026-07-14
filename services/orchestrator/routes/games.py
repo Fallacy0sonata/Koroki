@@ -264,7 +264,10 @@ async def chess_resign(req: ChessResignRequest) -> dict:
 import re as _re
 
 _STATE_RE = _re.compile(r"state\s*[:\-]\s*(progressing|blocked|regressed)", _re.I)
-_DO_RE = _re.compile(r"do\s*[:\-]\s*(click|press|hold|scroll|wait|look)\b\s*(.*)", _re.I)
+_DO_RE = _re.compile(
+    r"do\s*[:\-]\s*(hold_click|click|press|hold|scroll|wait|look|push_goal|pop_goal|skill|save_skill|plan)\b\s*(.*)",
+    _re.I,
+)
 _SAY_RE = _re.compile(r"say\s*[:\-]\s*(.+)", _re.I)
 
 
@@ -275,6 +278,41 @@ class GameDecideRequest(BaseModel):
     state_doc: str = Field(default="", max_length=1500)
     scene: str = Field(..., min_length=1, max_length=900)
     knowledge: str = Field(default="", max_length=700)
+    # Blackboard exact-text layer (LIMBS wave 1, 2026-07-09): the words OCR
+    # actually read on screen. The VLM scene is prose; click targets ground
+    # on these — "click the store button" needs the word to exist.
+    ocr_block: str = Field(default="", max_length=400)
+    # Game Mind blocks (2026-07-05): the persistent-agency context — goal stack,
+    # action->effect memory, numeric progress, failure lessons, saved skills.
+    # Assembled by game_agent.py's GameMind; empty strings when absent.
+    goals_block: str = Field(default="", max_length=700)
+    recent_block: str = Field(default="", max_length=900)
+    metrics_block: str = Field(default="", max_length=600)
+    lessons_block: str = Field(default="", max_length=700)
+    skills_block: str = Field(default="", max_length=400)
+    # "play" = normal STATE/DO/SAY cycle; "curriculum" = the Voyager-style goal
+    # review (pre-verified 2026-07-05: the 4B never pushes/pops goals inline —
+    # meta-cognition needs its own call where it's the ONLY thing asked).
+    mode: str = Field(default="play", max_length=16)
+
+
+_GOAL_RE = _re.compile(r"goal_action\s*[:\-]\s*(keep|pop_then_push|pop|push)\b\s*(.*)", _re.I)
+_GOAL_BARE_RE = _re.compile(r"^\s*(keep|pop_then_push|pop|push)\b\s*(.*)", _re.I | _re.M)
+
+
+def parse_curriculum(raw: str) -> dict:
+    """Parse the goal-review reply: KEEP / POP / PUSH <goal> / POP_THEN_PUSH <goal>.
+
+    Tolerant of a missing GOAL_ACTION: prefix — the 4B answered a bare 'keep'
+    on first live contact (2026-07-05)."""
+    m = _GOAL_RE.search(raw) or _GOAL_BARE_RE.search(raw)
+    if not m:
+        return {"goal_action": "keep", "goal": ""}
+    verb = m.group(1).lower()
+    goal = m.group(2).strip().strip(".!")[:160]
+    if verb in ("push", "pop_then_push") and not goal:
+        return {"goal_action": "keep", "goal": ""}
+    return {"goal_action": verb, "goal": goal}
 
 
 def parse_decision(raw: str) -> dict:
@@ -293,7 +331,11 @@ def parse_decision(raw: str) -> dict:
     if m:
         verb, rest = m.group(1).lower(), m.group(2).strip().strip(".!")
         if verb == "click" and rest:
-            action = {"type": "click", "target": rest[:120]}
+            # She sometimes copies the option-list syntax into the target
+            # ("click 'store' / scroll down") — keep only the first option,
+            # strip quotes; pointing can't hit a menu of alternatives.
+            target = rest.split("/")[0].strip().strip("'\"").strip()
+            action = {"type": "click", "target": target[:120]} if target else {"type": "look"}
         elif verb == "press" and rest:
             action = {"type": "press", "key": rest.split()[0][:16]}
         elif verb == "hold" and rest:
@@ -304,6 +346,19 @@ def parse_decision(raw: str) -> dict:
             except (ValueError, IndexError):
                 secs = 1.5
             action = {"type": "hold", "key": key, "seconds": secs}
+        elif verb == "hold_click" and rest:
+            # "hold_click the pump handle 3" — trailing number = seconds
+            parts = rest.split("/")[0].strip().strip("'\"").split()
+            secs = 1.5
+            if len(parts) > 1:
+                try:
+                    secs = float(parts[-1])
+                    parts = parts[:-1]
+                except ValueError:
+                    pass
+            target = " ".join(parts).strip()
+            action = ({"type": "hold_click", "target": target[:120], "seconds": secs}
+                      if target else {"type": "look"})
         elif verb == "scroll":
             low = rest.lower()
             amount = 3 if "up" in low else -3
@@ -314,6 +369,20 @@ def parse_decision(raw: str) -> dict:
             except (ValueError, IndexError):
                 secs = 2.0
             action = {"type": "wait", "seconds": secs}
+        # Game Mind meta-actions — handled by the PlaySession, never by hands.
+        elif verb == "push_goal" and rest:
+            action = {"type": "push_goal", "goal": rest[:160]}
+        elif verb == "pop_goal":
+            action = {"type": "pop_goal"}
+        elif verb == "skill" and rest:
+            action = {"type": "skill", "name": rest.split()[0][:40]}
+        elif verb == "save_skill" and rest:
+            action = {"type": "save_skill", "name": rest.split()[0][:40]}
+        # LIMBS W1.2: multi-step delegation to the motor planner ("plan open
+        # the shop and buy the cheapest upgrade") — PlaySession expands it via
+        # /v1/games/plan and executes the steps closed-loop.
+        elif verb == "plan" and rest:
+            action = {"type": "plan", "intent": rest[:200]}
         # 'look' (or empty rest for click/press) stays/observes
 
     say = ""
@@ -326,6 +395,134 @@ def parse_decision(raw: str) -> dict:
     return {"task_state": task_state, "action": action, "say": say}
 
 
+# ── LIMBS W1.2: the motor planner (captain intent → schema-locked steps) ──
+
+PLAN_STEP_VERBS = ("click", "press", "hold", "hold_click", "scroll_up", "scroll_down", "wait")
+
+# The brain's /v1/plan locks generation to this schema at the logit level —
+# a malformed plan cannot be emitted (lm-format-enforcer in .venv_brain2).
+PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "steps": {
+            "type": "array", "minItems": 1, "maxItems": 5,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "verb": {"type": "string", "enum": list(PLAN_STEP_VERBS)},
+                    "target": {"type": "string", "maxLength": 60},
+                    "seconds": {"type": "number", "minimum": 0, "maximum": 8},
+                },
+                "required": ["verb", "target"],
+            },
+        },
+        "abort_if": {"type": "string", "maxLength": 80},
+    },
+    "required": ["steps"],
+}
+
+_PLANNER_SYSTEM = (
+    "You are the motor planner for a game-playing agent. Turn the captain's "
+    "intent into 1-5 concrete UI steps. Rules: use ONLY elements visible in "
+    "the on-screen text; durations go in the 'seconds' field, never in "
+    "'target'; abort_if is a SHORT stop condition (example: 'a Robux purchase "
+    "page appears'), never a copy of the screen text. Real-money rule: to "
+    "close or escape a popup/offer/purchase page, the ONLY valid step is "
+    "clicking its X or close button, or pressing escape — one single step, "
+    "never click the offer itself and never click buy or purchase buttons. "
+    'Example: intent "close this popup", screen "Special Offer! | Buy Now | X" '
+    '-> {"steps": [{"verb": "click", "target": "X"}], "abort_if": "a purchase '
+    'page opens"}. Output JSON only.'
+)
+
+
+def normalize_plan_step(step: dict) -> dict | None:
+    """Planner step → executor action, or None to drop it.
+
+    Encodes the first live-probe lessons (2026-07-09): the 4B sometimes puts a
+    wait's duration in 'target', and durations must clamp to the hands' rails.
+    Pure function, contract-tested.
+    """
+    verb = str(step.get("verb", "")).lower()
+    target = str(step.get("target", "")).strip()
+    secs = step.get("seconds")
+    good_secs = float(secs) if isinstance(secs, (int, float)) and secs > 0 else None
+
+    if verb in ("click", "hold_click"):
+        if not target:
+            return None
+        action: dict = {"type": verb, "target": target[:120]}
+        if verb == "hold_click":
+            action["seconds"] = min(good_secs or 1.5, 8.0)
+        return action
+    if verb == "press":
+        return {"type": "press", "key": target.split()[0][:16]} if target else None
+    if verb == "hold":
+        if not target:
+            return None
+        return {"type": "hold", "key": target.split()[0][:16],
+                "seconds": min(good_secs or 1.5, 8.0)}
+    if verb in ("scroll_up", "scroll_down"):
+        return {"type": "scroll", "amount": 3 if verb == "scroll_up" else -3}
+    if verb == "wait":
+        s = good_secs
+        if s is None:
+            try:
+                s = float(target)  # probe lesson: duration lands in target
+            except ValueError:
+                s = 2.0
+        return {"type": "wait", "seconds": max(0.5, min(s, 8.0))}
+    return None
+
+
+class GamePlanRequest(BaseModel):
+    request_id: str = Field(default="", max_length=128)
+    game: str = Field(..., min_length=1, max_length=120)
+    intent: str = Field(..., min_length=1, max_length=200)
+    ocr_block: str = Field(default="", max_length=400)
+    knowledge: str = Field(default="", max_length=700)
+
+
+@router.post("/games/plan")
+async def game_plan(req: GamePlanRequest) -> dict:
+    """Captain intent → executable closed-loop steps (LIMBS W1.2)."""
+    settings = get_settings()
+    plan_url = settings["services"]["brain"]["url"] + "/v1/plan"
+
+    knowledge = f"\ngame notes: {req.knowledge}" if req.knowledge else ""
+    message = (
+        f"game: {req.game}{knowledge}\n"
+        f"intent: {req.intent}\n"
+        f"exact text on screen (OCR): {req.ocr_block or '(nothing read)'}\n"
+        "plan the steps."
+    )
+    payload = {
+        "request_id": req.request_id or f"plan_{uuid.uuid4().hex[:8]}",
+        "system": _PLANNER_SYSTEM,
+        "message": message[:4000],
+        "json_schema": PLAN_SCHEMA,
+        "max_new_tokens": 220,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(plan_url, json=payload)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"planner unreachable: {exc}")
+    if resp.status_code != 200:
+        # 501 = transformers rollback engine (no filters) — caller degrades to
+        # single-action decides; anything else is a real failure.
+        raise HTTPException(status_code=502,
+                            detail=f"planner unavailable ({resp.status_code})")
+    plan_obj = resp.json().get("plan") or {}
+    steps = [s for s in (normalize_plan_step(x) for x in plan_obj.get("steps") or [])
+             if s is not None]
+    return {
+        "request_id": req.request_id,
+        "steps": steps,
+        "abort_if": str(plan_obj.get("abort_if") or "")[:80],
+    }
+
+
 @router.post("/games/decide")
 async def game_decide(req: GameDecideRequest) -> dict:
     """One play-cycle decision: scene + state in, STATE/DO/SAY out."""
@@ -333,16 +530,76 @@ async def game_decide(req: GameDecideRequest) -> dict:
     brain_url = settings["services"]["brain"]["url"] + "/v1/generate"
 
     knowledge = f"\ngame notes: {req.knowledge}" if req.knowledge else ""
+    ocr = f"\nexact text on screen (OCR): {req.ocr_block}" if req.ocr_block else ""
     state_doc = req.state_doc or "(the session just started)"
-    message = (
+    # Game Mind blocks lead the message — goals before pixels, so she pursues
+    # instead of describes (the whole point of the 2026-07-05 agency arc).
+    mind_parts = [b for b in (req.goals_block, req.metrics_block, req.recent_block,
+                              req.lessons_block, req.skills_block) if b]
+    mind = ("\n".join(mind_parts) + "\n") if mind_parts else ""
+
+    if req.mode == "strategy":
+        # The optimizer's eye (owner 2026-07-05: "look around, evaluate, make
+        # things efficient" — she ignored 32% demand instead of lowering price).
+        # Output persists as the STRATEGY block in every subsequent decide.
+        message = (
+            f"[you're playing '{req.game}'. study break — no move this turn.\n"
+            f"{mind}"
+            f"on screen: {req.scene}{ocr}]\n"
+            "think like an optimizer: look at EVERY number and control on screen. "
+            "what is inefficient or being wasted right now? what mechanic are you "
+            "ignoring? (the kind of thinking: unsold inventory piling up = price "
+            "too high; low demand % = lower the price; idle money = an upgrade "
+            "is affordable.)\n"
+            "reply with EXACTLY three short lines:\n"
+            "NOTICED: <the most important number/mechanic you were ignoring>\n"
+            "INEFFICIENCY: <what's suboptimal right now>\n"
+            "PLAN: <the concrete next 2-3 moves to fix it>"
+        )
+    elif req.mode == "curriculum":
+        # Goal review is the ONLY question — meta-cognition gets its own call.
+        # GOAL_STATUS forces the numeric comparison BEFORE the verdict — first
+        # live contact showed the 4B answering "keep" on a clearly-completed
+        # goal because nothing made it look at the numbers (2026-07-05).
+        message = (
+            f"[you're playing '{req.game}'. quick goal check, no move this turn.\n"
+            f"{mind}"
+            f"latest on screen: {req.scene}]\n"
+            "rules: if the metrics show the current goal's condition is met -> pop "
+            "(or pop_then_push with the next milestone). if there is NO current "
+            "goal above -> you MUST push one small concrete next milestone toward "
+            "the FINAL GOAL. otherwise keep. a milestone is an IN-GAME step that "
+            "names something visible on the screen right now (a button, a number "
+            "to reach, a thing to buy) — never anything about yourself or your "
+            "systems.\n"
+            "reply in EXACTLY this format and nothing else:\n"
+            "GOAL_STATUS: <compare the current goal to the metrics in a few words>\n"
+            "GOAL_ACTION: keep / pop / push <next milestone> / pop_then_push <next milestone>"
+        )
+    else:
+        message = None  # built below (play mode)
+    if message is None:
+        message = (
         f"[you're playing '{req.game}' live on stream. objective: {req.objective}.{knowledge}\n"
+        f"{mind}"
         f"what's happened so far: {state_doc}\n"
-        f"on screen right now: {req.scene}]\n"
-        "decide your next move. reply in EXACTLY this format and nothing else:\n"
+        f"on screen right now: {req.scene}{ocr}]\n"
+        "decide your next move — the one that best advances your CURRENT GOAL. "
+        "hard rule: NEVER click anything that leads outside the game or toward "
+        "real money — merch, gift shops, t-shirts, app store links, donate/"
+        "subscribe buttons, checkout pages. real-world purchases are not part "
+        "of any game.\n"
+        "reply in EXACTLY this format and nothing else:\n"
         "STATE: progressing or blocked or regressed\n"
-        "DO: click <thing on the screen> / press <key> / hold <key> <seconds> "
-        "(hold w to walk forward) / scroll up / scroll down / wait / look\n"
-        "SAY: one short line to your viewers, or [silent]"
+        "DO: click <thing on the screen> / hold_click <thing> <seconds> "
+        "(keep the mouse held on it) / press <key> / hold <key> <seconds> "
+        "(hold w to walk forward) / scroll up / scroll down / wait / look / "
+        "plan <a multi-step goal in plain words — the motor planner breaks it "
+        "into precise steps> / "
+        "push_goal <new sub-goal you'll work on now> / pop_goal (current goal is DONE) / "
+        "skill <saved skill name> / save_skill <name for the recent working sequence>\n"
+        "SAY: one short line to your viewers, or [silent]\n"
+        "your reply MUST start with the word STATE:"
     )
 
     felt = None
@@ -352,9 +609,14 @@ async def game_decide(req: GameDecideRequest) -> dict:
     except Exception:
         pass
 
+    # Thinking ON for game reasoning (2026-07-05, owner: "she lacks a thinking
+    # engine — demand is 32% and she never considers lowering the price").
+    # Qwen3's <think> phase reasons about the position before the format lines;
+    # the brain strips the think block, and _DO_RE finds the format regardless.
+    # Budget covers thinking + answer; cycles are ~10s apart so latency fits.
     payload = {
         "request_id": req.request_id or f"decide_{uuid.uuid4().hex[:8]}",
-        "message": message[:2000],
+        "message": message[:5500],  # brain cap raised to 6000 (2026-07-05)
         "user_context": {
             "user_id": "game_session",
             "relationship_score": 100,
@@ -362,8 +624,8 @@ async def game_decide(req: GameDecideRequest) -> dict:
             "mode": "owner",
             "platform": "discord",
         },
-        "max_new_tokens": 96,
-        "enable_thinking": False,
+        "max_new_tokens": 96 if req.mode == "curriculum" else 352,
+        "enable_thinking": req.mode != "curriculum",
         "enable_tools": False,
         "felt_state": felt,
     }
@@ -372,9 +634,43 @@ async def game_decide(req: GameDecideRequest) -> dict:
             resp = await client.post(brain_url, json=payload)
             resp.raise_for_status()
             raw = str(resp.json().get("text") or "").strip()
+
+            # Format retry: long mind-block prompts make the 4B drop the template
+            # and answer in prose (a live session froze on 'look' this way,
+            # 2026-07-05 — and v1 of this retry never fired because its gate
+            # looked for the WORD 'do', which prose contains). Gate on the real
+            # parse regex, and retry with a COMPACT prompt — short prompts
+            # produced clean format all day; length is what breaks it.
+            if req.mode == "play" and not _DO_RE.search(raw):
+                payload["message"] = (
+                    f"[playing '{req.game}'. current goal: "
+                    f"{(req.goals_block.splitlines()[-1] if req.goals_block else req.objective)[:140]}\n"
+                    f"on screen: {req.scene[:500]}]\n"
+                    "reply with ONLY these three lines:\n"
+                    "STATE: progressing or blocked\n"
+                    "DO: click <thing> / press <key> / scroll up / scroll down / wait / look\n"
+                    "SAY: one short line or [silent]"
+                )
+                payload["request_id"] += "_r"
+                resp = await client.post(brain_url, json=payload)
+                resp.raise_for_status()
+                retry_raw = str(resp.json().get("text") or "").strip()
+                if _DO_RE.search(retry_raw):
+                    raw = retry_raw
     except httpx.HTTPError as exc:
         logger.warning("[Games] decide brain call failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"brain unavailable: {exc}")
+
+    if req.mode == "strategy":
+        logger.info("[Games] strategy(%s): %r", req.game, raw[:120])
+        return {"strategy": raw[:500], "raw": raw[:500]}
+
+    if req.mode == "curriculum":
+        review = parse_curriculum(raw)
+        review["raw"] = raw[:400]
+        logger.info("[Games] curriculum(%s): %s %r", req.game,
+                    review["goal_action"], review["goal"][:60])
+        return review
 
     decision = parse_decision(raw)
     decision["raw"] = raw[:400]
