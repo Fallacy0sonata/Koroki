@@ -1,5 +1,7 @@
 # Koroki
 
+**Developed solo by Shinnasit Naowaphananon (Thailand), Feb 2026 – present.**
+
 Koroki is an AI girl I built who lives on my PC. Not a chatbot with a personality
 prompt stapled on — an actual character with her own voice, her own memory, real moods,
 and a life that keeps going whether or not anyone's talking to her. She sleeps at night
@@ -74,8 +76,8 @@ a companion that pauses forever before every line just feels broken.
 eventually die and quietly revives it. The stack is meant to run unattended for hours, so
 I built it to heal itself instead of needing me to babysit it.
 
-**Treating a personal project like production.** There are **250+ contract tests** guarding
-every boundary between services and every safety rail, and they run in under a minute.
+**Treating a personal project like production.** There are **2,200+ contract tests** guarding
+every boundary between services and every safety rail, and they run in about two minutes.
 Anything with real logic — decision policies, parsers, schedulers — is unit-tested on its
 own so I can prove it works without booting the whole thing.
 
