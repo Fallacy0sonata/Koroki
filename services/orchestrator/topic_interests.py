@@ -39,7 +39,7 @@ _INTERESTS: list[InterestCategory] = [
     InterestCategory(
         "music", 90, "positive",
         ("music", "song", "songs", "singer", "singing", "melody", "album", "playlist",
-         "yoasobi", "ado", "lisa", "jpop", "j-pop", "j pop", "band", "track", "tracks",
+         "ado", "lisa", "jpop", "j-pop", "j pop", "band", "track", "tracks",
          "listen to", "listening to", "concert", "lyrics", "genre", "mv", "music video"),
     ),
     InterestCategory(

@@ -2619,7 +2619,7 @@ async def _presence_loop():
                     _channel_topic = decision.get("topic_signal", "")  # set by evaluate endpoint
                     _music_topic = _channel_topic in ("music", "singing") or any(
                         kw in " ".join(list(_channel_recent_msgs.get(ch_id, []))).lower()
-                        for kw in ("sing", "song", "music", "yoasobi")
+                        for kw in ("sing", "song", "music")
                     )
                     if _music_topic and action == "full" and random.random() < 0.30:
                         _singing_offers = [
