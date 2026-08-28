@@ -1,118 +1,196 @@
-<svg viewBox="0 0 1020 760" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ttl desc" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
-  <title id="ttl">Koroki — full system architecture</title>
-  <desc id="desc">Entry surfaces (Discord, Web, Twitch, OBS) reach the Orchestrator, which runs her emotion, memory, scheduler, world and sleep subsystems. It coordinates five model services (Language, Voice, Vision, Ears, Singing) that share one 12GB GPU under a Supervisor, and drives two autonomy systems: a vision-only game agent and a streaming embodiment compositor.</desc>
+<svg viewBox="0 0 1180 1040" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Helvetica, Arial, sans-serif">
   <style>
-    :root{
-      --box:#ffffff; --stroke:#ddd6d9; --text:#241e21; --muted:#7c7276;
-      --accent:#8E1F35; --acc-fill:#f7ecef; --acc-stroke:#d6a6b3; --acc-text:#8E1F35;
-      --chip:#fbf7f8; --chip-stroke:#e7dfe2;
-      --zone:#f5f1f2; --zone-stroke:#e6dee1;
-      --line:#b7adb2; --acc-line:#c07d8f;
-    }
-    @media (prefers-color-scheme: dark){
-      :root{
-        --box:#201a1d; --stroke:#3b3236; --text:#ece6e8; --muted:#a99fa4;
-        --accent:#d16a83; --acc-fill:#2f2027; --acc-stroke:#6d3a49; --acc-text:#e6adba;
-        --chip:#241d21; --chip-stroke:#3a3034;
-        --zone:#1b1618; --zone-stroke:#332a2e;
-        --line:#564b51; --acc-line:#8a5666;
-      }
-    }
-    .box{fill:var(--box);stroke:var(--stroke);stroke-width:1.4;}
-    .orch{fill:var(--acc-fill);stroke:var(--acc-stroke);stroke-width:2;}
-    .chip{fill:var(--chip);stroke:var(--chip-stroke);stroke-width:1.2;}
-    .zone{fill:var(--zone);stroke:var(--zone-stroke);stroke-width:1.4;}
-    .t{fill:var(--text);font-weight:600;}
-    .ct{fill:var(--acc-text);font-weight:700;}
-    .s{fill:var(--muted);font-weight:400;}
-    .zt{fill:var(--acc-text);font-weight:700;letter-spacing:.3px;}
-    .ln{stroke:var(--line);stroke-width:1.6;fill:none;}
-    .al{stroke:var(--acc-line);stroke-width:1.8;fill:none;}
-    .dl{stroke:var(--line);stroke-width:1.3;fill:none;stroke-dasharray:4 5;}
+    .panel { fill:#161923; stroke:#333a4d; stroke-width:1.2; }
+    .chip  { fill:#1b2030; stroke:#3a4157; stroke-width:1; }
+    .orch  { fill:#1a1520; stroke:#8a4f6b; stroke-width:1.5; }
+    .safe  { fill:#1b2030; stroke:#ff9a62; stroke-width:1.2; }
+    .full  { fill:#1b2030; stroke:#ff9a62; stroke-width:1.2; }
+    .tier  { fill:#7b8296; font-size:12px; font-weight:600; letter-spacing:2.5px; }
+    .t     { fill:#e9ecf4; font-size:14px; font-weight:600; }
+    .tt    { fill:#e9ecf4; font-size:16px; font-weight:600; }
+    .s     { fill:#9aa3ba; font-size:11px; }
+    .rose  { fill:#e37ba0; }
+    .ember { fill:#ff9a62; }
+    .ln    { stroke:#4a5268; stroke-width:1.2; fill:none; }
+    .lnd   { stroke:#4a5268; stroke-width:1.2; fill:none; stroke-dasharray:4 4; }
   </style>
   <defs>
-    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--line)"/></marker>
-    <marker id="aa" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--acc-line)"/></marker>
+    <marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#4a5268"/>
+    </marker>
   </defs>
 
-  <text class="s" x="60" y="20" font-size="11">SURFACES</text>
-  <g>
-    <rect class="box" x="225" y="26" width="120" height="34" rx="17"/><text class="t" x="285" y="48" font-size="13.5" text-anchor="middle">Discord</text>
-    <rect class="box" x="375" y="26" width="120" height="34" rx="17"/><text class="t" x="435" y="48" font-size="13.5" text-anchor="middle">Web</text>
-    <rect class="box" x="525" y="26" width="120" height="34" rx="17"/><text class="t" x="585" y="48" font-size="13.5" text-anchor="middle">Twitch</text>
-    <rect class="box" x="675" y="26" width="120" height="34" rx="17"/><text class="t" x="735" y="48" font-size="13.5" text-anchor="middle">OBS · Stream</text>
-  </g>
-  <rect class="chip" x="838" y="24" width="122" height="38" rx="9"/>
-  <text class="t" x="899" y="42" font-size="12" text-anchor="middle">Config</text>
-  <text class="s" x="899" y="56" font-size="10.5" text-anchor="middle">one settings file</text>
-  <path class="dl" d="M899 62 C899 80 720 80 620 92" marker-end="url(#a)"/>
+  <rect x="0" y="0" width="1180" height="1040" fill="#0e1016"/>
 
-  <path class="ln" d="M285 60 L360 90" marker-end="url(#a)"/>
-  <path class="ln" d="M435 60 L470 90" marker-end="url(#a)"/>
-  <path class="ln" d="M585 60 L545 90" marker-end="url(#a)"/>
-  <path class="ln" d="M735 60 L640 90" marker-end="url(#a)"/>
+  <!-- SURFACES -->
+  <text x="60" y="38" class="tier">SURFACES</text>
+  <rect x="60"  y="52" width="150" height="44" rx="10" class="panel"/>
+  <text x="135" y="79" class="t" text-anchor="middle">Discord</text>
+  <rect x="224" y="52" width="110" height="44" rx="10" class="panel"/>
+  <text x="279" y="79" class="t" text-anchor="middle">Web</text>
+  <rect x="348" y="52" width="110" height="44" rx="10" class="panel"/>
+  <text x="403" y="79" class="t" text-anchor="middle">Twitch</text>
+  <rect x="472" y="52" width="140" height="44" rx="10" class="panel"/>
+  <text x="542" y="79" class="t" text-anchor="middle">OBS · Stream</text>
+  <rect x="940" y="52" width="180" height="44" rx="10" class="panel" stroke-dasharray="4 4"/>
+  <text x="1030" y="72" class="t" text-anchor="middle" font-size="13">Config</text>
+  <text x="1030" y="88" class="s" text-anchor="middle">one settings file</text>
 
-  <rect class="orch" x="60" y="92" width="900" height="188" rx="16"/>
-  <text x="80" y="120" font-size="16"><tspan class="ct">Orchestrator</tspan><tspan class="s" font-size="13"> · FastAPI — the captain's cabin</tspan></text>
-  <text class="s" x="80" y="139" font-size="11.5">validates every request · assembles her context · streams the reply · the only public surface</text>
-  <g>
-    <rect class="chip" x="78" y="152" width="162" height="112" rx="10"/><text class="t" x="159" y="182" font-size="13" text-anchor="middle">Emotion engine</text><text class="s" x="159" y="201" font-size="10.5" text-anchor="middle">mood, caused</text><text class="s" x="159" y="216" font-size="10.5" text-anchor="middle">by real events</text>
-    <rect class="chip" x="253" y="152" width="162" height="112" rx="10"/><text class="t" x="334" y="182" font-size="13" text-anchor="middle">Memory</text><text class="s" x="334" y="201" font-size="10.5" text-anchor="middle">long-term,</text><text class="s" x="334" y="216" font-size="10.5" text-anchor="middle">per person</text>
-    <rect class="chip" x="428" y="152" width="162" height="112" rx="10"/><text class="t" x="509" y="182" font-size="13" text-anchor="middle">Proactive scheduler</text><text class="s" x="509" y="201" font-size="10.5" text-anchor="middle">she acts</text><text class="s" x="509" y="216" font-size="10.5" text-anchor="middle">on her own</text>
-    <rect class="chip" x="603" y="152" width="162" height="112" rx="10"/><text class="t" x="684" y="182" font-size="13" text-anchor="middle">World &amp; body</text><text class="s" x="684" y="201" font-size="10.5" text-anchor="middle">time · weather</text><text class="s" x="684" y="216" font-size="10.5" text-anchor="middle">body state</text>
-    <rect class="chip" x="778" y="152" width="162" height="112" rx="10"/><text class="t" x="859" y="178" font-size="13" text-anchor="middle">Sleep · dreams</text><text class="t" x="859" y="195" font-size="13" text-anchor="middle">journal</text><text class="s" x="859" y="214" font-size="10.5" text-anchor="middle">a real daily life</text>
-    <text class="s" x="159" y="242" font-size="9.5" text-anchor="middle">relationship model</text>
-    <text class="s" x="334" y="242" font-size="9.5" text-anchor="middle">recall + beliefs</text>
-    <text class="s" x="509" y="242" font-size="9.5" text-anchor="middle">eligibility · cooldown</text>
-    <text class="s" x="684" y="242" font-size="9.5" text-anchor="middle">endocrine link</text>
-    <text class="s" x="859" y="242" font-size="9.5" text-anchor="middle">wakes on schedule</text>
-  </g>
+  <line x1="135" y1="96" x2="135" y2="134" class="ln" marker-end="url(#arr)"/>
+  <line x1="279" y1="96" x2="279" y2="134" class="ln" marker-end="url(#arr)"/>
+  <line x1="403" y1="96" x2="403" y2="134" class="ln" marker-end="url(#arr)"/>
+  <line x1="542" y1="96" x2="542" y2="134" class="ln" marker-end="url(#arr)"/>
+  <line x1="1030" y1="96" x2="1030" y2="134" class="lnd" marker-end="url(#arr)"/>
 
-  <path class="ln" d="M159 280 L159 330" marker-end="url(#a)"/>
-  <path class="ln" d="M334 280 L334 330" marker-end="url(#a)"/>
-  <path class="ln" d="M509 280 L509 330" marker-end="url(#a)"/>
-  <path class="ln" d="M684 280 L684 330" marker-end="url(#a)"/>
-  <path class="ln" d="M859 280 L859 330" marker-end="url(#a)"/>
+  <!-- ORCHESTRATOR -->
+  <rect x="60" y="140" width="1060" height="336" rx="14" class="orch"/>
+  <text x="84" y="172" class="tt"><tspan class="rose">Orchestrator</tspan> — the captain's cabin</text>
+  <text x="84" y="193" class="s">the only public surface · validates every request · assembles her context · streams her reply</text>
 
-  <text class="s" x="60" y="320" font-size="11">MODEL SERVICES</text>
-  <rect class="box" x="78" y="330" width="162" height="80" rx="12"/><text class="t" x="159" y="362" font-size="14" text-anchor="middle">Language</text><text class="s" x="159" y="382" font-size="10.5" text-anchor="middle">LLM + her persona</text><text class="s" x="159" y="397" font-size="10.5" text-anchor="middle">(trained adapter)</text>
-  <rect class="box" x="253" y="330" width="162" height="80" rx="12"/><text class="t" x="334" y="362" font-size="14" text-anchor="middle">Voice</text><text class="s" x="334" y="382" font-size="10.5" text-anchor="middle">real-time speech</text><text class="s" x="334" y="397" font-size="10.5" text-anchor="middle">with emotion</text>
-  <rect class="box" x="428" y="330" width="162" height="80" rx="12"/><text class="t" x="509" y="362" font-size="14" text-anchor="middle">Vision</text><text class="s" x="509" y="382" font-size="10.5" text-anchor="middle">reads the screen</text><text class="s" x="509" y="397" font-size="10.5" text-anchor="middle">scene + OCR</text>
-  <rect class="box" x="603" y="330" width="162" height="80" rx="12"/><text class="t" x="684" y="362" font-size="14" text-anchor="middle">Ears</text><text class="s" x="684" y="382" font-size="10.5" text-anchor="middle">hears voice chat</text><text class="s" x="684" y="397" font-size="10.5" text-anchor="middle">speech-to-text</text>
-  <rect class="box" x="778" y="330" width="162" height="80" rx="12"/><text class="t" x="859" y="362" font-size="14" text-anchor="middle">Singing</text><text class="s" x="859" y="382" font-size="10.5" text-anchor="middle">full song covers</text><text class="s" x="859" y="397" font-size="10.5" text-anchor="middle">in her voice</text>
+  <rect x="76" y="212" width="196" height="116" rx="10" class="chip"/>
+  <text x="90" y="238" class="t">Emotion engine</text>
+  <text x="90" y="262" class="s">her real mood — caused by</text>
+  <text x="90" y="278" class="s">events, fading with time</text>
 
-  <path class="dl" d="M159 410 L159 434"/><path class="dl" d="M334 410 L334 434"/><path class="dl" d="M509 410 L509 434"/><path class="dl" d="M684 410 L684 434"/><path class="dl" d="M859 410 L859 434"/>
-  <rect class="chip" x="78" y="434" width="862" height="40" rx="10"/>
-  <text x="509" y="459" font-size="12" text-anchor="middle"><tspan class="ct">Supervisor</tspan><tspan class="s"> keeps every service alive &amp; revives crashes   ·   all five models share one 12&#8202;GB GPU — loaded / unloaded on demand</tspan></text>
+  <rect x="284" y="212" width="196" height="116" rx="10" class="chip"/>
+  <text x="298" y="238" class="t">Memory</text>
+  <text x="298" y="262" class="s">long-term, per person</text>
+  <text x="298" y="278" class="s">recall · beliefs · relationship</text>
 
-  <rect class="zone" x="60" y="500" width="558" height="240" rx="14"/>
-  <text class="zt" x="80" y="527" font-size="13">GAME AGENCY</text>
-  <text class="s" x="185" y="527" font-size="11">— she plays from vision alone, no game integration</text>
-  <path class="dl" d="M509 410 C509 470 360 480 300 556" marker-end="url(#a)"/>
-  <text class="s" x="392" y="500" font-size="9.5" text-anchor="middle">frames from Vision + Language</text>
+  <rect x="492" y="212" width="196" height="116" rx="10" class="chip"/>
+  <text x="506" y="238" class="t">Proactive drive</text>
+  <text x="506" y="262" class="s">she acts unprompted</text>
+  <text x="506" y="278" class="s">eligibility · cooldowns</text>
 
-  <rect class="box" x="80" y="556" width="118" height="60" rx="10"/><text class="t" x="139" y="582" font-size="12.5" text-anchor="middle">Perceive</text><text class="s" x="139" y="600" font-size="10" text-anchor="middle">watch · OCR · VLM</text>
-  <rect class="box" x="228" y="556" width="118" height="60" rx="10"/><text class="t" x="287" y="582" font-size="12.5" text-anchor="middle">Decide</text><text class="s" x="287" y="600" font-size="10" text-anchor="middle">goal → plan</text>
-  <rect class="box" x="376" y="556" width="118" height="60" rx="10"/><text class="t" x="435" y="582" font-size="12.5" text-anchor="middle">Act · Hands</text><text class="s" x="435" y="600" font-size="10" text-anchor="middle">mouse &amp; keyboard</text>
-  <rect class="orch" x="518" y="556" width="86" height="60" rx="10"/><text class="ct" x="561" y="580" font-size="11.5" text-anchor="middle">Safety</text><text class="ct" x="561" y="595" font-size="11.5" text-anchor="middle">rails</text><text class="s" x="561" y="611" font-size="9" text-anchor="middle">no money</text>
-  <path class="al" d="M198 586 L226 586" marker-end="url(#aa)"/>
-  <path class="al" d="M346 586 L374 586" marker-end="url(#aa)"/>
-  <path class="al" d="M494 586 L516 586" marker-end="url(#aa)"/>
+  <rect x="700" y="212" width="196" height="116" rx="10" class="chip"/>
+  <text x="714" y="238" class="t">World &amp; body</text>
+  <text x="714" y="262" class="s">time · weather · body state</text>
+  <text x="714" y="278" class="s">felt, never labelled</text>
 
-  <rect class="chip" x="140" y="656" width="180" height="50" rx="10"/><text class="t" x="230" y="678" font-size="11.5" text-anchor="middle">Game knowledge</text><text class="s" x="230" y="694" font-size="10" text-anchor="middle">learned per game, persists</text>
-  <path class="dl" d="M287 656 L287 618" marker-end="url(#a)"/>
-  <rect class="chip" x="360" y="656" width="234" height="50" rx="10"/><text class="t" x="477" y="678" font-size="11.5" text-anchor="middle">Learning pipeline (roadmap)</text><text class="s" x="477" y="694" font-size="10" text-anchor="middle">behavior-cloning from recorded play</text>
+  <rect x="908" y="212" width="196" height="116" rx="10" class="chip"/>
+  <text x="922" y="238" class="t">Sleep · dreams · journal</text>
+  <text x="922" y="262" class="s">a real daily life</text>
+  <text x="922" y="278" class="s">wakes on schedule, grumpy</text>
 
-  <rect class="zone" x="636" y="500" width="324" height="240" rx="14"/>
-  <text class="zt" x="656" y="527" font-size="13">EMBODIMENT</text>
-  <text class="s" x="750" y="527" font-size="11">— her body on stream</text>
-  <rect class="box" x="662" y="560" width="130" height="66" rx="10"/><text class="t" x="727" y="588" font-size="12.5" text-anchor="middle">OBS capture</text><text class="s" x="727" y="606" font-size="10" text-anchor="middle">real screen feed</text>
-  <rect class="box" x="812" y="560" width="132" height="66" rx="10"/><text class="t" x="878" y="583" font-size="12.5" text-anchor="middle">Stage compositor</text><text class="s" x="878" y="600" font-size="10" text-anchor="middle">PixiJS · parallax</text><text class="s" x="878" y="614" font-size="10" text-anchor="middle">room · lighting</text>
-  <path class="al" d="M792 593 L810 593" marker-end="url(#aa)"/>
-  <text class="s" x="800" y="577" font-size="9" text-anchor="middle">WHEP</text>
-  <path class="dl" d="M859 474 C859 500 878 520 878 558" marker-end="url(#a)"/>
-  <text class="s" x="878" y="656" font-size="10" text-anchor="middle">animated by her felt state</text>
-  <text class="s" x="878" y="674" font-size="10" text-anchor="middle">viseme mouth · expressions</text>
+  <rect x="76" y="344" width="196" height="116" rx="10" class="chip"/>
+  <text x="90" y="370" class="t">Wondering</text>
+  <text x="90" y="394" class="s">a thought every few minutes</text>
+  <text x="90" y="410" class="s">keep · note · look up · tell</text>
 
-  <text class="s" x="60" y="752" font-size="10.5">Everything runs offline on one machine · typed contracts between services · 250+ tests gate every change</text>
+  <rect x="284" y="344" width="196" height="116" rx="10" class="chip"/>
+  <text x="298" y="370" class="t">Curiosity &amp; lookup</text>
+  <text x="298" y="394" class="s">checks before claiming</text>
+  <text x="298" y="410" class="s">words · facts · references</text>
+
+  <rect x="492" y="344" width="196" height="116" rx="10" class="chip"/>
+  <text x="506" y="370" class="t">Taste &amp; fixations</text>
+  <text x="506" y="394" class="s">develops likes of her own</text>
+  <text x="506" y="410" class="s">brings them up herself</text>
+
+  <rect x="700" y="344" width="196" height="116" rx="10" class="chip"/>
+  <text x="714" y="370" class="t">Social judgment</text>
+  <text x="714" y="394" class="s">who to answer · who to ignore</text>
+  <text x="714" y="410" class="s">silence must have a reason</text>
+
+  <rect x="908" y="344" width="196" height="116" rx="10" class="chip"/>
+  <text x="922" y="370" class="t">Little rituals</text>
+  <text x="922" y="394" class="s">morning catch-up · humming</text>
+  <text x="922" y="410" class="s">a plant she tends</text>
+
+  <!-- MODEL SERVICES -->
+  <text x="60" y="512" class="tier">MODEL SERVICES</text>
+  <line x1="145"  y1="476" x2="145"  y2="522" class="lnd" marker-end="url(#arr)"/>
+  <line x1="323"  y1="476" x2="323"  y2="522" class="lnd" marker-end="url(#arr)"/>
+  <line x1="501"  y1="476" x2="501"  y2="522" class="lnd" marker-end="url(#arr)"/>
+  <line x1="679"  y1="476" x2="679"  y2="522" class="lnd" marker-end="url(#arr)"/>
+  <line x1="857"  y1="476" x2="857"  y2="522" class="lnd" marker-end="url(#arr)"/>
+  <line x1="1035" y1="476" x2="1035" y2="522" class="lnd" marker-end="url(#arr)"/>
+
+  <rect x="62" y="526" width="166" height="96" rx="10" class="panel"/>
+  <text x="76" y="554" class="t">Language</text>
+  <text x="76" y="578" class="s">local LLM + her</text>
+  <text x="76" y="594" class="s">trained persona</text>
+
+  <rect x="240" y="526" width="166" height="96" rx="10" class="panel"/>
+  <text x="254" y="554" class="t">Voice · EN</text>
+  <text x="254" y="578" class="s">emotional speech,</text>
+  <text x="254" y="594" class="s">real time</text>
+
+  <rect x="418" y="526" width="166" height="96" rx="10" class="panel"/>
+  <text x="432" y="554" class="t">Voice · JP</text>
+  <text x="432" y="578" class="s">bilingual — light</text>
+  <text x="432" y="594" class="s">enough for CPU</text>
+
+  <rect x="596" y="526" width="166" height="96" rx="10" class="panel"/>
+  <text x="610" y="554" class="t">Vision</text>
+  <text x="610" y="578" class="s">scene reading + OCR</text>
+  <text x="610" y="594" class="s">images people share</text>
+
+  <rect x="774" y="526" width="166" height="96" rx="10" class="panel"/>
+  <text x="788" y="554" class="t">Ears</text>
+  <text x="788" y="578" class="s">live voice chat</text>
+  <text x="788" y="594" class="s">speech → text</text>
+
+  <rect x="952" y="526" width="166" height="96" rx="10" class="panel"/>
+  <text x="966" y="554" class="t">Singing</text>
+  <text x="966" y="578" class="s">full covers in her</text>
+  <text x="966" y="594" class="s">voice, hands-free</text>
+
+  <!-- SUPERVISOR -->
+  <rect x="62" y="646" width="1056" height="48" rx="10" class="panel"/>
+  <text x="590" y="675" class="s" text-anchor="middle"><tspan class="t">Supervisor</tspan>  assumes every service will eventually die, and quietly revives it · the heavy models share one 12 GB GPU, loaded and unloaded around her day</text>
+
+  <line x1="342" y1="694" x2="342" y2="714" class="lnd" marker-end="url(#arr)"/>
+  <line x1="883" y1="694" x2="883" y2="714" class="lnd" marker-end="url(#arr)"/>
+
+  <!-- GAME AGENCY -->
+  <rect x="62" y="718" width="560" height="180" rx="14" class="panel"/>
+  <text x="82" y="748" class="tt"><tspan class="ember">Game agency</tspan></text>
+  <text x="82" y="768" class="s">she watches, plays and commentates — pixels in, mouse &amp; keyboard out</text>
+
+  <rect x="82" y="786" width="118" height="76" rx="10" class="chip"/>
+  <text x="96" y="812" class="t" font-size="13">Perceive</text>
+  <text x="96" y="834" class="s">sees the screen</text>
+  <line x1="200" y1="824" x2="214" y2="824" class="ln" marker-end="url(#arr)"/>
+
+  <rect x="216" y="786" width="118" height="76" rx="10" class="chip"/>
+  <text x="230" y="812" class="t" font-size="13">Decide</text>
+  <text x="230" y="834" class="s">goal → plan</text>
+  <line x1="334" y1="824" x2="348" y2="824" class="ln" marker-end="url(#arr)"/>
+
+  <rect x="350" y="786" width="118" height="76" rx="10" class="chip"/>
+  <text x="364" y="812" class="t" font-size="13">Act · hands</text>
+  <text x="364" y="834" class="s">mouse &amp; keyboard</text>
+  <line x1="468" y1="824" x2="482" y2="824" class="ln" marker-end="url(#arr)"/>
+
+  <rect x="484" y="786" width="118" height="76" rx="10" class="safe"/>
+  <text x="498" y="812" class="t" font-size="13">Safety rails</text>
+  <text x="498" y="830" class="s">no money · locked</text>
+  <text x="498" y="844" class="s">to the game · tested</text>
+
+  <!-- EMBODIMENT -->
+  <rect x="646" y="718" width="474" height="180" rx="14" class="panel"/>
+  <text x="666" y="748" class="tt"><tspan class="ember">Embodiment</tspan></text>
+  <text x="666" y="768" class="s">her body on stream</text>
+
+  <rect x="666" y="786" width="180" height="76" rx="10" class="chip"/>
+  <text x="680" y="812" class="t" font-size="13">OBS capture</text>
+  <text x="680" y="834" class="s">real screen feed</text>
+  <line x1="846" y1="824" x2="876" y2="824" class="ln" marker-end="url(#arr)"/>
+
+  <rect x="878" y="786" width="222" height="76" rx="10" class="chip"/>
+  <text x="892" y="812" class="t" font-size="13">Stage compositor</text>
+  <text x="892" y="830" class="s">parallax room · lighting</text>
+  <text x="892" y="844" class="s">animated by her felt state</text>
+
+  <!-- TWO BUILDS -->
+  <rect x="62" y="922" width="520" height="64" rx="10" class="panel"/>
+  <text x="78" y="948" class="t">EVERYDAY BUILD</text>
+  <text x="78" y="968" class="s">everything above on one 12 GB card at home · $0 · fully offline</text>
+
+  <rect x="598" y="922" width="522" height="64" rx="10" class="full"/>
+  <text x="614" y="948" class="t">FULL POTENTIAL <tspan class="s">(one launcher flag)</tspan></text>
+  <text x="614" y="968" class="s">brain &amp; heavy voice rent horsepower for a session · her mind, memory and life stay home</text>
+
+  <text x="590" y="1016" class="s" text-anchor="middle">typed contracts at every boundary · 2,200+ tests gate every change · she keeps living whether or not anyone is talking</text>
 </svg>
